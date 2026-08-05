@@ -1212,26 +1212,16 @@ span.yh-ov-expand-btn:hover {
   gap: 4px;
   padding: 6px 10px;
   border-bottom: 1px solid var(--yh-border);
-  background: var(--background-secondary);
-  flex-wrap: wrap;
-}
-
-.yh-epub-toolbar-title {
-  font-size: var(--yh-font-md);
-  font-weight: 600;
-  color: var(--text-normal);
-  margin-right: auto;
-  padding: 0 6px;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: var(--background-primary);
+  flex-wrap: nowrap;
+  overflow: visible;
 }
 
 .yh-epub-toolbar-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   min-width: 28px;
   height: 28px;
   padding: 0 8px;
@@ -1255,9 +1245,62 @@ span.yh-ov-expand-btn:hover {
   border-color: var(--yh-yellow);
 }
 
+.yh-epub-toolbar-btn.is-hidden {
+  display: none !important;
+}
+
+.yh-epub-toolbar-overflow-btn {
+  margin-left: auto;
+}
+
+.yh-epub-toolbar-overflow-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 10px;
+  min-width: 160px;
+  max-width: min(260px, 80vw);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--yh-border);
+  border-radius: var(--yh-radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  padding: 4px;
+}
+
+.yh-epub-toolbar-overflow-menu.is-open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.yh-epub-toolbar-overflow-menu .yh-epub-toolbar-btn {
+  justify-content: flex-start;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.yh-epub-toolbar-overflow-menu .yh-epub-toolbar-btn svg {
+  margin-right: 8px;
+}
+
+.yh-epub-toolbar-overflow-menu .yh-epub-theme-swatches {
+  justify-content: center;
+  width: 100%;
+  margin: 4px 0;
+  padding: 4px;
+  border-top: 1px solid var(--yh-border);
+  border-bottom: 1px solid var(--yh-border);
+}
+
 .yh-epub-theme-swatches {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 4px;
   margin-left: 4px;
 }
@@ -1905,8 +1948,6 @@ a.yh-epub-goto-link {
 
 a.yh-epub-goto-link:hover {
   text-decoration: underline;
-}
-  transform: translate(-50%, -100%) translateY(-4px);
 }
 
 /* 段落模式 */

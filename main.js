@@ -12183,6 +12183,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.tocEntries = [];
     this.currentChapter = "";
     this.currentPercent = 0;
+    this.themeObserver = null;
     this.sidebarOpen = false;
     this.contextMenuEl = null;
     this.lastSelectedCfiRange = "";
@@ -12210,6 +12211,12 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.blurHandler = null;
     this.focusHandler = null;
     this.lastFlushTimestamp = 0;
+    // ---- 工具栏溢出菜单 ----
+    this.toolbarItems = [];
+    this.toolbarOverflowBtn = null;
+    this.toolbarOverflowEl = null;
+    this.toolbarResizeObserver = null;
+    this.toolbarOverflowOutsideClickHandler = null;
     /**
      * 销毁当前浮动上下文菜单。
      */
@@ -12262,15 +12269,18 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   }
   /** 视图打开时构建 DOM 骨架 */
   async onOpen() {
-    this.containerEl.addClass("yh-epub-reader");
+    this.contentEl.addClass("yh-epub-reader");
     this.buildLayout();
     this.startReadingTimeTracker();
+    this.startObsidianThemeWatcher();
   }
   /** 视图关闭时释放 foliate 资源与定时器 */
   async onClose() {
     this.stopReadingTimeTracker();
     this.dismissContextMenu();
     this.destroyRendition();
+    this.stopObsidianThemeWatcher();
+    this.destroyToolbarOverflow();
   }
   // ================================================================
   // 文件加载（FileView 核心）
@@ -12317,11 +12327,19 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   /**
    * 构建完整的 DOM 布局骨架：
    * 工具栏 → [侧边栏 | 阅读区] → 进度条
+   *
+   * 使用 this.contentEl 而不是 this.containerEl，保留 Obsidian 原生 view-header
+   *（文件图标 / 标题 / 更多菜单），让 EPUB 工具栏位于标题栏下方，从而支持
+   * 在阅读时切换文件和访问文件选项。
    */
   buildLayout() {
-    this.containerEl.empty();
-    this.toolbarEl = this.containerEl.createDiv({ cls: "yh-epub-toolbar" });
-    const body = this.containerEl.createDiv({ cls: "yh-epub-body" });
+    this.contentEl.empty();
+    this.toolbarItems = [];
+    this.toolbarOverflowBtn = null;
+    this.toolbarOverflowEl = null;
+    this.toolbarEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar" });
+    this.toolbarOverflowEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
+    const body = this.contentEl.createDiv({ cls: "yh-epub-body" });
     this.sidebarContainerEl = body.createDiv({ cls: "yh-epub-sidebar" });
     this.sidebarContainerEl.toggleClass("is-open", this.sidebarOpen);
     const sidebarTabs = this.sidebarContainerEl.createDiv({ cls: "yh-epub-sidebar-tabs" });
@@ -12333,68 +12351,93 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     tocTab.addEventListener("click", () => this.renderSidebar());
     this.sidebarContentEl = this.sidebarContainerEl.createDiv({ cls: "yh-epub-sidebar-content" });
     this.readerContainerEl = body.createDiv({ cls: "yh-epub-reader-area" });
-    this.progressEl = this.containerEl.createDiv({ cls: "yh-epub-progress" });
-    this.containerEl.addEventListener("keydown", (event) => this.handleKeydown(event));
+    this.progressEl = this.contentEl.createDiv({ cls: "yh-epub-progress" });
+    this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
+  }
+  /**
+   * 监听 Obsidian 原生主题变化（亮/暗切换、主题更换、CSS snippet 变更）。
+   *
+   * 当 Obsidian 修改 body 的 class 或 style 时，重新应用当前 EPUB 主题，确保
+   * obsidian 主题下颜色实时同步，同时让 CSS 变量驱动的外层容器/工具栏立刻生效。
+   */
+  startObsidianThemeWatcher() {
+    this.stopObsidianThemeWatcher();
+    this.themeObserver = new MutationObserver(() => {
+      this.applyFoliateAppearance();
+    });
+    this.themeObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["class", "style"]
+    });
+  }
+  stopObsidianThemeWatcher() {
+    if (this.themeObserver) {
+      this.themeObserver.disconnect();
+      this.themeObserver = null;
+    }
   }
   // ================================================================
   // 工具栏
   // ================================================================
   /**
-   * 渲染工具栏：侧边栏切换、书名、字号、主题、翻页模式、导航按钮。
+   * 渲染工具栏：侧边栏切换、字号、主题、翻页模式、导航按钮。
+   *
+   * 书名已由 Obsidian 原生 view-header 显示，因此工具栏内不再重复显示书名。
+   * 工具栏固定为一行，装不下的按钮会自动移入“更多”下拉菜单。
    */
   renderToolbar() {
     this.toolbarEl.empty();
-    const toggleBtn = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u5207\u6362\u4FA7\u8FB9\u680F", "aria-label": "\u5207\u6362\u4FA7\u8FB9\u680F" }
+    this.toolbarItems = [];
+    if (this.toolbarOverflowEl) {
+      this.toolbarOverflowEl.empty();
+      this.toolbarOverflowEl.removeClass("is-open");
+    }
+    const createBtn = (opts) => {
+      const btn = this.toolbarEl.createEl("button", {
+        cls: "yh-epub-toolbar-btn",
+        attr: { type: "button", title: opts.title, "aria-label": opts.title }
+      });
+      if (opts.icon) (0, import_obsidian12.setIcon)(btn, opts.icon);
+      if (opts.text) btn.textContent = opts.text;
+      btn.addEventListener("click", opts.onClick);
+      return btn;
+    };
+    this.toolbarItems.push(
+      createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
+      createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
+      createBtn({ text: "A+", title: "\u653E\u5927\u5B57\u53F7", onClick: () => this.changeFontSize(1) }),
+      this.renderThemeSwatches(),
+      createBtn({ icon: "search", title: "\u641C\u7D22\u5168\u6587", onClick: () => this.toggleToolbarSearch() }),
+      createBtn({
+        icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets",
+        title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875",
+        onClick: () => this.toggleFlowMode()
+      }),
+      createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
+      createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() })
+    );
+    this.toolbarOverflowBtn = createBtn({
+      icon: "more-vertical",
+      title: "\u66F4\u591A",
+      onClick: () => this.toggleToolbarOverflow()
     });
-    (0, import_obsidian12.setIcon)(toggleBtn, "menu");
-    toggleBtn.addEventListener("click", () => this.toggleSidebar());
-    this.toolbarEl.createDiv({
-      cls: "yh-epub-toolbar-title",
-      text: this.file?.basename ?? ""
-    });
-    const fontSizeDec = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u7F29\u5C0F\u5B57\u53F7", "aria-label": "\u7F29\u5C0F\u5B57\u53F7" },
-      text: "A-"
-    });
-    fontSizeDec.addEventListener("click", () => this.changeFontSize(-1));
-    const fontSizeInc = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u653E\u5927\u5B57\u53F7", "aria-label": "\u653E\u5927\u5B57\u53F7" },
-      text: "A+"
-    });
-    fontSizeInc.addEventListener("click", () => this.changeFontSize(1));
-    this.renderThemeSwatches();
-    const searchBtn = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u641C\u7D22\u5168\u6587", "aria-label": "\u641C\u7D22\u5168\u6587" }
-    });
-    (0, import_obsidian12.setIcon)(searchBtn, "search");
-    searchBtn.addEventListener("click", () => this.toggleToolbarSearch());
-    const flowBtn = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875" }
-    });
-    (0, import_obsidian12.setIcon)(flowBtn, this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets");
-    flowBtn.addEventListener("click", () => this.toggleFlowMode());
-    const prevBtn = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u4E0A\u4E00\u9875", "aria-label": "\u4E0A\u4E00\u9875" }
-    });
-    (0, import_obsidian12.setIcon)(prevBtn, "chevron-left");
-    prevBtn.addEventListener("click", () => this.prevPage());
-    const nextBtn = this.toolbarEl.createEl("button", {
-      cls: "yh-epub-toolbar-btn",
-      attr: { type: "button", title: "\u4E0B\u4E00\u9875", "aria-label": "\u4E0B\u4E00\u9875" }
-    });
-    (0, import_obsidian12.setIcon)(nextBtn, "chevron-right");
-    nextBtn.addEventListener("click", () => this.nextPage());
+    this.toolbarOverflowBtn.addClass("yh-epub-toolbar-overflow-btn");
+    this.toolbarItems.push(this.toolbarOverflowBtn);
+    for (const item of this.toolbarItems) {
+      if (item !== this.toolbarOverflowBtn) {
+        this.toolbarEl.appendChild(item);
+      }
+    }
+    if (this.toolbarOverflowBtn) {
+      this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+    }
+    this.setupToolbarOverflow();
+    this.layoutToolbarOverflow();
   }
   /**
    * 在工具栏中渲染主题色块选择器，点击切换阅读主题。
+   * @returns 主题色块容器元素
    */
   renderThemeSwatches() {
     const container = this.toolbarEl.createDiv({ cls: "yh-epub-theme-swatches" });
@@ -12411,6 +12454,93 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       swatch.style.background = theme.swatch;
       swatch.toggleClass("is-active", theme.id === this.currentTheme);
       swatch.addEventListener("click", () => this.switchTheme(theme.id));
+    }
+    return container;
+  }
+  /**
+   * 设置工具栏溢出下拉菜单的 ResizeObserver 与点击外部关闭监听。
+   */
+  setupToolbarOverflow() {
+    this.destroyToolbarOverflow();
+    this.toolbarResizeObserver = new ResizeObserver(() => {
+      this.layoutToolbarOverflow();
+    });
+    this.toolbarResizeObserver.observe(this.toolbarEl);
+    this.toolbarOverflowOutsideClickHandler = (event) => {
+      if (!this.toolbarOverflowEl?.hasClass("is-open")) return;
+      const target = event.target;
+      if (!this.toolbarOverflowEl.contains(target) && !this.toolbarOverflowBtn?.contains(target)) {
+        this.toolbarOverflowEl.removeClass("is-open");
+      }
+    };
+    document.addEventListener("click", this.toolbarOverflowOutsideClickHandler);
+  }
+  /**
+   * 清理工具栏溢出菜单的监听器。
+   */
+  destroyToolbarOverflow() {
+    if (this.toolbarResizeObserver) {
+      this.toolbarResizeObserver.disconnect();
+      this.toolbarResizeObserver = null;
+    }
+    if (this.toolbarOverflowOutsideClickHandler) {
+      document.removeEventListener("click", this.toolbarOverflowOutsideClickHandler);
+      this.toolbarOverflowOutsideClickHandler = null;
+    }
+  }
+  /**
+   * 切换“更多”下拉菜单的显示/隐藏。
+   */
+  toggleToolbarOverflow() {
+    this.toolbarOverflowEl?.toggleClass("is-open");
+  }
+  /**
+   * 根据工具栏可用宽度，把放不下的按钮移入“更多”下拉菜单。
+   */
+  layoutToolbarOverflow() {
+    if (!this.toolbarOverflowEl || !this.toolbarOverflowBtn) return;
+    const toolbarWidth = this.toolbarEl.clientWidth;
+    if (toolbarWidth === 0) return;
+    for (const item of this.toolbarItems) {
+      if (item !== this.toolbarOverflowBtn) {
+        this.toolbarEl.appendChild(item);
+      }
+    }
+    this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+    this.toolbarOverflowEl.empty();
+    const gap = 4;
+    const paddingBuffer = 4;
+    const availableWidth = toolbarWidth - paddingBuffer;
+    let plainTotal = 0;
+    for (let i3 = 0; i3 < this.toolbarItems.length; i3++) {
+      const item = this.toolbarItems[i3];
+      if (item === this.toolbarOverflowBtn) continue;
+      plainTotal += item.offsetWidth + (i3 > 0 ? gap : 0);
+    }
+    if (plainTotal <= availableWidth) {
+      this.toolbarOverflowBtn.addClass("is-hidden");
+      return;
+    }
+    this.toolbarOverflowBtn.removeClass("is-hidden");
+    const moreBtnWidth = this.toolbarOverflowBtn.offsetWidth;
+    let usedWidth = moreBtnWidth + gap;
+    let overflowIndex = -1;
+    for (let i3 = 0; i3 < this.toolbarItems.length; i3++) {
+      const item = this.toolbarItems[i3];
+      if (item === this.toolbarOverflowBtn) continue;
+      const itemWidth = item.offsetWidth + (i3 > 0 ? gap : 0);
+      if (usedWidth + itemWidth > availableWidth) {
+        overflowIndex = i3;
+        break;
+      }
+      usedWidth += itemWidth;
+    }
+    if (overflowIndex !== -1) {
+      for (let i3 = overflowIndex; i3 < this.toolbarItems.length; i3++) {
+        const item = this.toolbarItems[i3];
+        if (item === this.toolbarOverflowBtn) continue;
+        this.toolbarOverflowEl.appendChild(item);
+      }
     }
   }
   // ================================================================
@@ -13494,8 +13624,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     ].join("\n");
     this.foliateView.renderer?.setStyles?.(css);
     this.foliateView.renderer?.render?.();
-    this.foliateView.style.backgroundColor = colors.background;
-    this.readerContainerEl.style.backgroundColor = colors.background;
+    const containerBg = this.currentTheme === "obsidian" ? "var(--background-primary)" : colors.background;
+    this.foliateView.style.backgroundColor = containerBg;
+    this.readerContainerEl.style.backgroundColor = containerBg;
   }
   applyFoliateLayout() {
     if (!this.foliateView) {

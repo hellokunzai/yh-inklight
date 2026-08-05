@@ -157,6 +157,7 @@ export class EpubReaderView extends FileView {
 	private currentFlowMode: EpubFlowMode;
 	private currentFontSize: number;
 	private currentTheme: EpubReadingTheme;
+	private themeObserver: MutationObserver | null = null;
 	private sidebarOpen = false;
 private contextMenuEl: HTMLElement | null = null;
 		private lastSelectedCfiRange = "";
@@ -195,6 +196,14 @@ private contextMenuEl: HTMLElement | null = null;
 	private readerContainerEl!: HTMLElement;
 	private progressEl!: HTMLElement;
 
+	// ---- 工具栏溢出菜单 ----
+
+	private toolbarItems: HTMLElement[] = [];
+	private toolbarOverflowBtn: HTMLElement | null = null;
+	private toolbarOverflowEl: HTMLElement | null = null;
+	private toolbarResizeObserver: ResizeObserver | null = null;
+	private toolbarOverflowOutsideClickHandler: ((event: MouseEvent) => void) | null = null;
+
 	// ================================================================
 	// 构造 & 生命周期
 	// ================================================================
@@ -232,9 +241,10 @@ private contextMenuEl: HTMLElement | null = null;
 
 	/** 视图打开时构建 DOM 骨架 */
 	override async onOpen(): Promise<void> {
-		this.containerEl.addClass("yh-epub-reader");
+		this.contentEl.addClass("yh-epub-reader");
 		this.buildLayout();
 		this.startReadingTimeTracker();
+		this.startObsidianThemeWatcher();
 	}
 
 	/** 视图关闭时释放 foliate 资源与定时器 */
@@ -242,6 +252,8 @@ private contextMenuEl: HTMLElement | null = null;
 		this.stopReadingTimeTracker();
 		this.dismissContextMenu();
 		this.destroyRendition();
+		this.stopObsidianThemeWatcher();
+		this.destroyToolbarOverflow();
 	}
 
 	// ================================================================
@@ -296,13 +308,21 @@ private contextMenuEl: HTMLElement | null = null;
 	/**
 	 * 构建完整的 DOM 布局骨架：
 	 * 工具栏 → [侧边栏 | 阅读区] → 进度条
+	 *
+	 * 使用 this.contentEl 而不是 this.containerEl，保留 Obsidian 原生 view-header
+	 *（文件图标 / 标题 / 更多菜单），让 EPUB 工具栏位于标题栏下方，从而支持
+	 * 在阅读时切换文件和访问文件选项。
 	 */
 	private buildLayout(): void {
-		this.containerEl.empty();
+		this.contentEl.empty();
+		this.toolbarItems = [];
+		this.toolbarOverflowBtn = null;
+		this.toolbarOverflowEl = null;
 
-		this.toolbarEl = this.containerEl.createDiv({ cls: "yh-epub-toolbar" });
+		this.toolbarEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar" });
+		this.toolbarOverflowEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
 
-		const body = this.containerEl.createDiv({ cls: "yh-epub-body" });
+		const body = this.contentEl.createDiv({ cls: "yh-epub-body" });
 
 		this.sidebarContainerEl = body.createDiv({ cls: "yh-epub-sidebar" });
 		this.sidebarContainerEl.toggleClass("is-open", this.sidebarOpen);
@@ -320,10 +340,36 @@ private contextMenuEl: HTMLElement | null = null;
 		this.readerContainerEl = body.createDiv({ cls: "yh-epub-reader-area" });
 		// 脚注预览 popover 元素（Phase 4-B P3）
 
-		this.progressEl = this.containerEl.createDiv({ cls: "yh-epub-progress" });
+		this.progressEl = this.contentEl.createDiv({ cls: "yh-epub-progress" });
 
-		this.containerEl.addEventListener("keydown", (event) => this.handleKeydown(event));
+		this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
 		this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
+	}
+
+	/**
+	 * 监听 Obsidian 原生主题变化（亮/暗切换、主题更换、CSS snippet 变更）。
+	 *
+	 * 当 Obsidian 修改 body 的 class 或 style 时，重新应用当前 EPUB 主题，确保
+	 * obsidian 主题下颜色实时同步，同时让 CSS 变量驱动的外层容器/工具栏立刻生效。
+	 */
+	private startObsidianThemeWatcher(): void {
+		this.stopObsidianThemeWatcher();
+
+		this.themeObserver = new MutationObserver(() => {
+			this.applyFoliateAppearance();
+		});
+
+		this.themeObserver.observe(document.body, {
+			attributes: true,
+			attributeFilter: ["class", "style"],
+		});
+	}
+
+	private stopObsidianThemeWatcher(): void {
+		if (this.themeObserver) {
+			this.themeObserver.disconnect();
+			this.themeObserver = null;
+		}
 	}
 
 	// ================================================================
@@ -331,74 +377,77 @@ private contextMenuEl: HTMLElement | null = null;
 	// ================================================================
 
 	/**
-	 * 渲染工具栏：侧边栏切换、书名、字号、主题、翻页模式、导航按钮。
+	 * 渲染工具栏：侧边栏切换、字号、主题、翻页模式、导航按钮。
+	 *
+	 * 书名已由 Obsidian 原生 view-header 显示，因此工具栏内不再重复显示书名。
+	 * 工具栏固定为一行，装不下的按钮会自动移入“更多”下拉菜单。
 	 */
 	private renderToolbar(): void {
 		this.toolbarEl.empty();
+		this.toolbarItems = [];
+		if (this.toolbarOverflowEl) {
+			this.toolbarOverflowEl.empty();
+			this.toolbarOverflowEl.removeClass("is-open");
+		}
 
-		const toggleBtn = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: "切换侧边栏", "aria-label": "切换侧边栏" },
-		});
-		setIcon(toggleBtn, "menu");
-		toggleBtn.addEventListener("click", () => this.toggleSidebar());
-
-		this.toolbarEl.createDiv({
-			cls: "yh-epub-toolbar-title",
-			text: this.file?.basename ?? "",
-		});
-
-		const fontSizeDec = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: "缩小字号", "aria-label": "缩小字号" },
-			text: "A-",
-		});
-		fontSizeDec.addEventListener("click", () => this.changeFontSize(-1));
-
-		const fontSizeInc = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: "放大字号", "aria-label": "放大字号" },
-			text: "A+",
-		});
-		fontSizeInc.addEventListener("click", () => this.changeFontSize(1));
-
-		this.renderThemeSwatches();
-
-			// 搜索按钮（Phase 4-B P4 - 移到工具栏）
-			const searchBtn = this.toolbarEl.createEl("button", {
+		const createBtn = (opts: {
+			icon?: string;
+			text?: string;
+			title: string;
+			onClick: () => void;
+		}): HTMLElement => {
+			const btn = this.toolbarEl.createEl("button", {
 				cls: "yh-epub-toolbar-btn",
-				attr: { type: "button", title: "搜索全文", "aria-label": "搜索全文" },
+				attr: { type: "button", title: opts.title, "aria-label": opts.title },
 			});
-			setIcon(searchBtn, "search");
-			searchBtn.addEventListener("click", () => this.toggleToolbarSearch());
+			if (opts.icon) setIcon(btn, opts.icon);
+			if (opts.text) btn.textContent = opts.text;
+			btn.addEventListener("click", opts.onClick);
+			return btn;
+		};
 
-			
-		const flowBtn = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页" },
-		});
-		setIcon(flowBtn, this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets");
-		flowBtn.addEventListener("click", () => this.toggleFlowMode());
+		this.toolbarItems.push(
+			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),
+			createBtn({ text: "A-", title: "缩小字号", onClick: () => this.changeFontSize(-1) }),
+			createBtn({ text: "A+", title: "放大字号", onClick: () => this.changeFontSize(1) }),
+			this.renderThemeSwatches(),
+			createBtn({ icon: "search", title: "搜索全文", onClick: () => this.toggleToolbarSearch() }),
+			createBtn({
+				icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets",
+				title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页",
+				onClick: () => this.toggleFlowMode(),
+			}),
+			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
+			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
+		);
 
-		const prevBtn = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: "上一页", "aria-label": "上一页" },
+		this.toolbarOverflowBtn = createBtn({
+			icon: "more-vertical",
+			title: "更多",
+			onClick: () => this.toggleToolbarOverflow(),
 		});
-		setIcon(prevBtn, "chevron-left");
-		prevBtn.addEventListener("click", () => this.prevPage());
+		this.toolbarOverflowBtn.addClass("yh-epub-toolbar-overflow-btn");
+		this.toolbarItems.push(this.toolbarOverflowBtn);
 
-		const nextBtn = this.toolbarEl.createEl("button", {
-			cls: "yh-epub-toolbar-btn",
-			attr: { type: "button", title: "下一页", "aria-label": "下一页" },
-		});
-		setIcon(nextBtn, "chevron-right");
-		nextBtn.addEventListener("click", () => this.nextPage());
+		// 普通项按顺序插入，溢出按钮固定在最右侧
+		for (const item of this.toolbarItems) {
+			if (item !== this.toolbarOverflowBtn) {
+				this.toolbarEl.appendChild(item);
+			}
+		}
+		if (this.toolbarOverflowBtn) {
+			this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+		}
+
+		this.setupToolbarOverflow();
+		this.layoutToolbarOverflow();
 	}
 
 	/**
 	 * 在工具栏中渲染主题色块选择器，点击切换阅读主题。
+	 * @returns 主题色块容器元素
 	 */
-	private renderThemeSwatches(): void {
+	private renderThemeSwatches(): HTMLElement {
 		const container = this.toolbarEl.createDiv({ cls: "yh-epub-theme-swatches" });
 
 		for (const theme of EPUB_READING_THEMES) {
@@ -414,6 +463,111 @@ private contextMenuEl: HTMLElement | null = null;
 			swatch.style.background = theme.swatch;
 			swatch.toggleClass("is-active", theme.id === this.currentTheme);
 			swatch.addEventListener("click", () => this.switchTheme(theme.id));
+		}
+		return container;
+	}
+
+	/**
+	 * 设置工具栏溢出下拉菜单的 ResizeObserver 与点击外部关闭监听。
+	 */
+	private setupToolbarOverflow(): void {
+		this.destroyToolbarOverflow();
+
+		this.toolbarResizeObserver = new ResizeObserver(() => {
+			this.layoutToolbarOverflow();
+		});
+		this.toolbarResizeObserver.observe(this.toolbarEl);
+
+		this.toolbarOverflowOutsideClickHandler = (event: MouseEvent) => {
+			if (!this.toolbarOverflowEl?.hasClass("is-open")) return;
+			const target = event.target as Node;
+			if (!this.toolbarOverflowEl.contains(target) && !this.toolbarOverflowBtn?.contains(target)) {
+				this.toolbarOverflowEl.removeClass("is-open");
+			}
+		};
+		document.addEventListener("click", this.toolbarOverflowOutsideClickHandler);
+	}
+
+	/**
+	 * 清理工具栏溢出菜单的监听器。
+	 */
+	private destroyToolbarOverflow(): void {
+		if (this.toolbarResizeObserver) {
+			this.toolbarResizeObserver.disconnect();
+			this.toolbarResizeObserver = null;
+		}
+		if (this.toolbarOverflowOutsideClickHandler) {
+			document.removeEventListener("click", this.toolbarOverflowOutsideClickHandler);
+			this.toolbarOverflowOutsideClickHandler = null;
+		}
+	}
+
+	/**
+	 * 切换“更多”下拉菜单的显示/隐藏。
+	 */
+	private toggleToolbarOverflow(): void {
+		this.toolbarOverflowEl?.toggleClass("is-open");
+	}
+
+	/**
+	 * 根据工具栏可用宽度，把放不下的按钮移入“更多”下拉菜单。
+	 */
+	private layoutToolbarOverflow(): void {
+		if (!this.toolbarOverflowEl || !this.toolbarOverflowBtn) return;
+
+		const toolbarWidth = this.toolbarEl.clientWidth;
+		if (toolbarWidth === 0) return;
+
+		// 先把所有可溢出项收回工具栏
+		for (const item of this.toolbarItems) {
+			if (item !== this.toolbarOverflowBtn) {
+				this.toolbarEl.appendChild(item);
+			}
+		}
+		// 再把溢出按钮移到最右侧（appendChild 会移动已有元素到末尾）
+		this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+		this.toolbarOverflowEl.empty();
+
+		const gap = 4;
+		const paddingBuffer = 4;
+		const availableWidth = toolbarWidth - paddingBuffer;
+
+		// 计算所有普通项的总宽度（不含更多按钮）
+		let plainTotal = 0;
+		for (let i = 0; i < this.toolbarItems.length; i++) {
+			const item = this.toolbarItems[i];
+			if (item === this.toolbarOverflowBtn) continue;
+			plainTotal += item.offsetWidth + (i > 0 ? gap : 0);
+		}
+
+		if (plainTotal <= availableWidth) {
+			// 全部装得下，隐藏更多按钮
+			this.toolbarOverflowBtn.addClass("is-hidden");
+			return;
+		}
+
+		this.toolbarOverflowBtn.removeClass("is-hidden");
+		const moreBtnWidth = this.toolbarOverflowBtn.offsetWidth;
+		let usedWidth = moreBtnWidth + gap;
+		let overflowIndex = -1;
+
+		for (let i = 0; i < this.toolbarItems.length; i++) {
+			const item = this.toolbarItems[i];
+			if (item === this.toolbarOverflowBtn) continue;
+			const itemWidth = item.offsetWidth + (i > 0 ? gap : 0);
+			if (usedWidth + itemWidth > availableWidth) {
+				overflowIndex = i;
+				break;
+			}
+			usedWidth += itemWidth;
+		}
+
+		if (overflowIndex !== -1) {
+			for (let i = overflowIndex; i < this.toolbarItems.length; i++) {
+				const item = this.toolbarItems[i];
+				if (item === this.toolbarOverflowBtn) continue;
+				this.toolbarOverflowEl.appendChild(item);
+			}
 		}
 	}
 
@@ -1691,8 +1845,14 @@ private contextMenuEl: HTMLElement | null = null;
 		].join("\n");
 		this.foliateView.renderer?.setStyles?.(css);
 		this.foliateView.renderer?.render?.();
-		(this.foliateView as unknown as HTMLElement).style.backgroundColor = colors.background;
-		this.readerContainerEl.style.backgroundColor = colors.background;
+
+		// obsidian 主题下，外层容器背景使用 CSS 变量，确保 Obsidian 主题切换时
+		// readerContainerEl 能实时跟随，无需等待 JS 重新解析。
+		const containerBg = this.currentTheme === "obsidian"
+			? "var(--background-primary)"
+			: colors.background;
+		(this.foliateView as unknown as HTMLElement).style.backgroundColor = containerBg;
+		this.readerContainerEl.style.backgroundColor = containerBg;
 	}
 
 	private applyFoliateLayout(): void {
