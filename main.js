@@ -12410,7 +12410,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       this.renderThemeSwatches(),
       createBtn({ icon: "search", title: "\u641C\u7D22\u5168\u6587", onClick: () => this.toggleToolbarSearch() }),
       createBtn({
-        icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets",
+        icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "scroll",
         title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875",
         onClick: () => this.toggleFlowMode()
       }),

@@ -413,7 +413,7 @@ private contextMenuEl: HTMLElement | null = null;
 			this.renderThemeSwatches(),
 			createBtn({ icon: "search", title: "搜索全文", onClick: () => this.toggleToolbarSearch() }),
 			createBtn({
-				icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "sheets",
+				icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "scroll",
 				title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页",
 				onClick: () => this.toggleFlowMode(),
 			}),
