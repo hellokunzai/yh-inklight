@@ -12206,6 +12206,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.readingTimeFlushTimer = null;
     this.progressSaveTimer = null;
     this.wheelDebounceTimer = null;
+    /** 滚动模式下跨章翻页过渡锁，防止 section 加载后的 scrollTop=0 触发假阳性 prev */
+    this.scrolledTransitionLock = false;
+    /** 最后一次跨章导航的时间戳，用于忽略导航后短时间内的 relocate（防止 false prev） */
+    this.lastSectionNavTime = 0;
     this.contextMenuDismissTimer = null;
     this.visibilityHandler = null;
     this.blurHandler = null;
@@ -12230,6 +12234,8 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       const index = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
       this.loadedSectionDocs.set(doc, index);
       this.currentLoadedDoc = doc;
+      this.scrolledTransitionLock = false;
+      this.lastSectionNavTime = Date.now();
       stripScriptsFromDocument(doc);
       void inlineBlockedStylesheets({ document: doc });
       this.attachSelectionListeners(doc);
@@ -12492,7 +12498,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    * 切换“更多”下拉菜单的显示/隐藏。
    */
   toggleToolbarOverflow() {
-    this.toolbarOverflowEl?.toggleClass("is-open");
+    if (this.toolbarOverflowEl) {
+      this.toolbarOverflowEl.toggleClass("is-open", !this.toolbarOverflowEl.hasClass("is-open"));
+    }
   }
   /**
    * 根据工具栏可用宽度，把放不下的按钮移入“更多”下拉菜单。
@@ -12889,6 +12897,16 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    * 处理 foliate relocate 事件。
    * 更新当前章节、百分比、进度条显示，并触发进度保存。
    *
+   * 滚动模式下的跨章翻页由 relocate 事件驱动：
+   * foliate-js 在 #container 滚动后经 250ms 防抖触发 #afterScroll('scroll')，
+   * 进而 dispatch CustomEvent('relocate', { detail: { reason, start, end, viewSize } })。
+   * 此时 renderer.start/end/viewSize 已是终值，零时序问题。
+   *
+   * 注意：不能使用 detail.fraction 做边界检测——fraction = start / viewSize，
+   * 当内容 2x viewport 时最大 fraction 仅 0.5，>= 0.98 永远不触发。
+   * 正确做法：直接读 renderer.start/end/viewSize，与 foliate 内部 #scrollPrev/#scrollNext
+   * 使用相同的边界条件（start <= 0 / viewSize - end <= 2）。
+   *
    * @param detail - foliate relocate event detail
    */
   handleRelocated(detail) {
@@ -12899,6 +12917,24 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.currentSectionIndex = Number.isFinite(spineIndex) ? spineIndex : 0;
     this.currentChapter = detail?.tocItem?.label ?? resolveChapterLabel(this.tocEntries, this.currentSectionIndex);
     this.currentPercent = percent;
+    if (this.currentFlowMode === "scrolled" && !this.scrolledTransitionLock) {
+      if (Date.now() - this.lastSectionNavTime >= 500) {
+        const r3 = this.foliateView?.renderer;
+        if (r3 && typeof r3.start === "number" && typeof r3.end === "number" && typeof r3.viewSize === "number") {
+          const sections = this.foliateView?.book?.sections;
+          const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
+          if (r3.viewSize - r3.end <= 2 && this.currentSectionIndex < maxIndex) {
+            this.scrolledTransitionLock = true;
+            this.lastSectionNavTime = Date.now();
+            this.nextPage();
+          } else if (r3.start <= 0 && this.currentSectionIndex > 0) {
+            this.scrolledTransitionLock = true;
+            this.lastSectionNavTime = Date.now();
+            this.prevPage();
+          }
+        }
+      }
+    }
     this.updateProgressBar(percent);
     this.debouncedSaveProgress(this.currentCfi, percent);
   }
@@ -13078,7 +13114,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   }
   /**
    * 处理鼠标滚轮事件。
-   * 在分页模式下通过滚轮翻页，带防抖保护。
+   * - 分页模式：滚轮直接翻页，带防抖保护。
+   * - 滚动模式：不做拦截，交给 foliate 内部 #container 自然滚动；
+   *   跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
    *
    * @param event - 滚轮事件
    */
@@ -13400,6 +13438,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       }
       this.foliateView = null;
     }
+    this.scrolledTransitionLock = false;
     this.renderedAnnotationMeta.clear();
     if (this.readerContainerEl) {
       this.readerContainerEl.empty();

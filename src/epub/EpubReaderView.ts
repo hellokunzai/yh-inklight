@@ -84,6 +84,7 @@ interface FoliateRelocateDetail {
 	cfi?: string;
 	index?: number;
 	fraction?: number;
+	reason?: string;
 	range?: Range;
 	tocItem?: { label?: string };
 }
@@ -182,6 +183,10 @@ private contextMenuEl: HTMLElement | null = null;
 	private readingTimeFlushTimer: number | null = null;
 	private progressSaveTimer: number | null = null;
 	private wheelDebounceTimer: number | null = null;
+	/** 滚动模式下跨章翻页过渡锁，防止 section 加载后的 scrollTop=0 触发假阳性 prev */
+	private scrolledTransitionLock = false;
+	/** 最后一次跨章导航的时间戳，用于忽略导航后短时间内的 relocate（防止 false prev） */
+	private lastSectionNavTime = 0;
 	private contextMenuDismissTimer: number | null = null;
 	private visibilityHandler: (() => void) | null = null;
 	private blurHandler: (() => void) | null = null;
@@ -506,7 +511,9 @@ private contextMenuEl: HTMLElement | null = null;
 	 * 切换“更多”下拉菜单的显示/隐藏。
 	 */
 	private toggleToolbarOverflow(): void {
-		this.toolbarOverflowEl?.toggleClass("is-open");
+		if (this.toolbarOverflowEl) {
+			this.toolbarOverflowEl.toggleClass("is-open", !this.toolbarOverflowEl.hasClass("is-open"));
+		}
 	}
 
 	/**
@@ -976,6 +983,16 @@ private contextMenuEl: HTMLElement | null = null;
 	 * 处理 foliate relocate 事件。
 	 * 更新当前章节、百分比、进度条显示，并触发进度保存。
 	 *
+	 * 滚动模式下的跨章翻页由 relocate 事件驱动：
+	 * foliate-js 在 #container 滚动后经 250ms 防抖触发 #afterScroll('scroll')，
+	 * 进而 dispatch CustomEvent('relocate', { detail: { reason, start, end, viewSize } })。
+	 * 此时 renderer.start/end/viewSize 已是终值，零时序问题。
+	 *
+	 * 注意：不能使用 detail.fraction 做边界检测——fraction = start / viewSize，
+	 * 当内容 2x viewport 时最大 fraction 仅 0.5，>= 0.98 永远不触发。
+	 * 正确做法：直接读 renderer.start/end/viewSize，与 foliate 内部 #scrollPrev/#scrollNext
+	 * 使用相同的边界条件（start <= 0 / viewSize - end <= 2）。
+	 *
 	 * @param detail - foliate relocate event detail
 	 */
 	private handleRelocated(detail: FoliateRelocateDetail): void {
@@ -987,6 +1004,33 @@ private contextMenuEl: HTMLElement | null = null;
 		this.currentSectionIndex = Number.isFinite(spineIndex) ? spineIndex : 0;
 		this.currentChapter = detail?.tocItem?.label ?? resolveChapterLabel(this.tocEntries, this.currentSectionIndex);
 		this.currentPercent = percent;
+
+		// 滚动模式：使用 renderer.start/end/viewSize 检测章节边界
+		// 条件：scrolled 模式 + 未锁定 + 距上次跨章超过 500ms
+		// 注意：不能用 detail.reason，foliate view.js #onRelocate 未传递 reason 字段
+		if (this.currentFlowMode === "scrolled" && !this.scrolledTransitionLock) {
+			if (Date.now() - this.lastSectionNavTime >= 500) {
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const r = this.foliateView?.renderer as any;
+				if (r && typeof r.start === "number" && typeof r.end === "number" && typeof r.viewSize === "number") {
+					const sections = this.foliateView?.book?.sections;
+					const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
+
+					// 到达底部（与 foliate #scrollNext 相同条件：viewSize - end <= 2）
+					if (r.viewSize - r.end <= 2 && this.currentSectionIndex < maxIndex) {
+						this.scrolledTransitionLock = true;
+						this.lastSectionNavTime = Date.now();
+						this.nextPage();
+					}
+					// 到达顶部（与 foliate #scrollPrev 相同条件：start <= 0）
+					else if (r.start <= 0 && this.currentSectionIndex > 0) {
+						this.scrolledTransitionLock = true;
+						this.lastSectionNavTime = Date.now();
+						this.prevPage();
+					}
+				}
+			}
+		}
 
 		this.updateProgressBar(percent);
 		this.debouncedSaveProgress(this.currentCfi, percent);
@@ -1197,7 +1241,9 @@ private contextMenuEl: HTMLElement | null = null;
 
 	/**
 	 * 处理鼠标滚轮事件。
-	 * 在分页模式下通过滚轮翻页，带防抖保护。
+	 * - 分页模式：滚轮直接翻页，带防抖保护。
+	 * - 滚动模式：不做拦截，交给 foliate 内部 #container 自然滚动；
+	 *   跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
 	 *
 	 * @param event - 滚轮事件
 	 */
@@ -1205,7 +1251,6 @@ private contextMenuEl: HTMLElement | null = null;
 		if (this.currentFlowMode !== "paginated") {
 			return;
 		}
-
 		event.preventDefault();
 
 		if (this.wheelDebounceTimer !== null) {
@@ -1563,6 +1608,8 @@ private contextMenuEl: HTMLElement | null = null;
 			}
 			this.foliateView = null;
 		}
+
+		this.scrolledTransitionLock = false;
 		this.renderedAnnotationMeta.clear();
 
 		if (this.readerContainerEl) {
@@ -1608,6 +1655,8 @@ private contextMenuEl: HTMLElement | null = null;
 		const index = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
 		this.loadedSectionDocs.set(doc, index);
 		this.currentLoadedDoc = doc;
+		this.scrolledTransitionLock = false; // 新 section 加载完毕，释放跨章过渡锁
+		this.lastSectionNavTime = Date.now(); // 重置时间戳，防止加载后 500ms 内的 relocate 误触发
 		stripScriptsFromDocument(doc);
 		void inlineBlockedStylesheets({ document: doc });
 		this.attachSelectionListeners(doc);
