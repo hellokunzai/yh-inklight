@@ -12206,10 +12206,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.readingTimeFlushTimer = null;
     this.progressSaveTimer = null;
     this.wheelDebounceTimer = null;
-    /** 滚动模式下跨章翻页过渡锁，防止 section 加载后的 scrollTop=0 触发假阳性 prev */
-    this.scrolledTransitionLock = false;
-    /** 最后一次跨章导航的时间戳，用于忽略导航后短时间内的 relocate（防止 false prev） */
-    this.lastSectionNavTime = 0;
+    /** 滚动模式下跨章导航进行中标志，防止重入 */
+    this.scrolledNavigating = false;
+    /** 清理 paginator scroll 事件监听 */
+    this.paginatorScrollCleanup = null;
     this.contextMenuDismissTimer = null;
     this.visibilityHandler = null;
     this.blurHandler = null;
@@ -12234,8 +12234,6 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       const index = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
       this.loadedSectionDocs.set(doc, index);
       this.currentLoadedDoc = doc;
-      this.scrolledTransitionLock = false;
-      this.lastSectionNavTime = Date.now();
       stripScriptsFromDocument(doc);
       void inlineBlockedStylesheets({ document: doc });
       this.attachSelectionListeners(doc);
@@ -12305,6 +12303,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       this.configureFoliateView(this.foliateView);
       this.registerFoliateEvents(this.foliateView);
       await openBookFromBuffer(this.foliateView, arrayBuffer, file.name);
+      this.attachPaginatorScrollListener();
       this.applyFoliateLayout();
       this.tocEntries = this.buildFoliateTocEntries(this.foliateView.book?.toc ?? []);
       this.applyFoliateAppearance();
@@ -12912,29 +12911,12 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   handleRelocated(detail) {
     const cfi = normalizeCfi(detail?.cfi);
     const percent = normalizePercent(detail?.fraction ?? this.currentPercent);
-    const spineIndex = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
+    const rawIndex = detail?.section?.current ?? detail?.index;
+    const spineIndex = typeof rawIndex === "number" ? rawIndex : this.currentSectionIndex;
     this.currentCfi = cfi || this.currentCfi;
     this.currentSectionIndex = Number.isFinite(spineIndex) ? spineIndex : 0;
     this.currentChapter = detail?.tocItem?.label ?? resolveChapterLabel(this.tocEntries, this.currentSectionIndex);
     this.currentPercent = percent;
-    if (this.currentFlowMode === "scrolled" && !this.scrolledTransitionLock) {
-      if (Date.now() - this.lastSectionNavTime >= 500) {
-        const r3 = this.foliateView?.renderer;
-        if (r3 && typeof r3.start === "number" && typeof r3.end === "number" && typeof r3.viewSize === "number") {
-          const sections = this.foliateView?.book?.sections;
-          const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
-          if (r3.viewSize - r3.end <= 2 && this.currentSectionIndex < maxIndex) {
-            this.scrolledTransitionLock = true;
-            this.lastSectionNavTime = Date.now();
-            this.nextPage();
-          } else if (r3.start <= 0 && this.currentSectionIndex > 0) {
-            this.scrolledTransitionLock = true;
-            this.lastSectionNavTime = Date.now();
-            this.prevPage();
-          }
-        }
-      }
-    }
     this.updateProgressBar(percent);
     this.debouncedSaveProgress(this.currentCfi, percent);
   }
@@ -13156,6 +13138,70 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     }
     const action = this.foliateView.prev ?? this.foliateView.goLeft;
     void action?.call(this.foliateView);
+  }
+  /**
+   * 监听 paginator 的 scroll 事件，在滚动模式下驱动跨章翻页。
+   *
+   * foliate-js paginator 在 #container 每次滚动后立即 dispatchEvent(new Event('scroll'))
+   * 到自身（paginator.js:551），此时 renderer.start/end/viewSize 已是终值。
+   *
+   * 核心问题：foliate 的 #scrollPrev 在 scrolled 模式下，当 start > 0 时只执行章内
+   * 滚动到 0（#scrollTo(0)），不跨章；需要第二次 prev() 调用才跨章。但单次防抖会
+   * 阻止第二次 scroll 事件触发 handler，导致用户卡在章节顶部。
+   *
+   * 修复方案：在 handler 中用 async 逻辑——第一次 prev()/next() 让 foliate 完成
+   * 章内滚动，await 完成后检查 currentSectionIndex 是否变化；如果没变（说明只是
+   * 章内滚动），立即再调一次 prev()/next() 跨章。用 navigating 标志替代防抖，
+   * 在跨章完成后设 300ms 冷却防止新章节的 scroll 事件触发反方向翻页。
+   */
+  attachPaginatorScrollListener() {
+    if (!this.foliateView?.renderer) return;
+    if (this.paginatorScrollCleanup) {
+      this.paginatorScrollCleanup();
+      this.paginatorScrollCleanup = null;
+    }
+    const renderer = this.foliateView.renderer;
+    const handler = () => {
+      if (this.currentFlowMode !== "scrolled") return;
+      if (this.scrolledNavigating) return;
+      const r3 = this.foliateView?.renderer;
+      if (!r3 || typeof r3.start !== "number" || typeof r3.end !== "number" || typeof r3.viewSize !== "number") return;
+      const atBottom = r3.viewSize - r3.end <= 2;
+      const atTop = r3.start <= 2;
+      if (!atBottom && !atTop) return;
+      const sections = this.foliateView?.book?.sections;
+      const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
+      const view = this.foliateView;
+      const prevFn = view.prev ?? view.goLeft;
+      const nextFn = view.next ?? view.goRight;
+      if (atBottom && this.currentSectionIndex < maxIndex && typeof nextFn === "function") {
+        this.scrolledNavigating = true;
+        void (async () => {
+          const sectionBefore = this.currentSectionIndex;
+          await nextFn.call(view);
+          if (this.currentSectionIndex === sectionBefore) {
+            await nextFn.call(view);
+          }
+          window.setTimeout(() => {
+            this.scrolledNavigating = false;
+          }, 300);
+        })();
+      } else if (atTop && this.currentSectionIndex > 0 && typeof prevFn === "function") {
+        this.scrolledNavigating = true;
+        void (async () => {
+          const sectionBefore = this.currentSectionIndex;
+          await prevFn.call(view);
+          if (this.currentSectionIndex === sectionBefore) {
+            await prevFn.call(view);
+          }
+          window.setTimeout(() => {
+            this.scrolledNavigating = false;
+          }, 300);
+        })();
+      }
+    };
+    renderer.addEventListener("scroll", handler);
+    this.paginatorScrollCleanup = () => renderer.removeEventListener("scroll", handler);
   }
   // ================================================================
   // 导航
@@ -13438,7 +13484,11 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       }
       this.foliateView = null;
     }
-    this.scrolledTransitionLock = false;
+    if (this.paginatorScrollCleanup) {
+      this.paginatorScrollCleanup();
+      this.paginatorScrollCleanup = null;
+    }
+    this.scrolledNavigating = false;
     this.renderedAnnotationMeta.clear();
     if (this.readerContainerEl) {
       this.readerContainerEl.empty();

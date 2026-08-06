@@ -87,6 +87,7 @@ interface FoliateRelocateDetail {
 	reason?: string;
 	range?: Range;
 	tocItem?: { label?: string };
+	section?: { current?: number; total?: number };
 }
 
 interface FoliateLoadDetail {
@@ -183,10 +184,10 @@ private contextMenuEl: HTMLElement | null = null;
 	private readingTimeFlushTimer: number | null = null;
 	private progressSaveTimer: number | null = null;
 	private wheelDebounceTimer: number | null = null;
-	/** 滚动模式下跨章翻页过渡锁，防止 section 加载后的 scrollTop=0 触发假阳性 prev */
-	private scrolledTransitionLock = false;
-	/** 最后一次跨章导航的时间戳，用于忽略导航后短时间内的 relocate（防止 false prev） */
-	private lastSectionNavTime = 0;
+	/** 滚动模式下跨章导航进行中标志，防止重入 */
+	private scrolledNavigating = false;
+	/** 清理 paginator scroll 事件监听 */
+	private paginatorScrollCleanup: (() => void) | null = null;
 	private contextMenuDismissTimer: number | null = null;
 	private visibilityHandler: (() => void) | null = null;
 	private blurHandler: (() => void) | null = null;
@@ -280,6 +281,7 @@ private contextMenuEl: HTMLElement | null = null;
 			this.configureFoliateView(this.foliateView);
 			this.registerFoliateEvents(this.foliateView);
 			await openBookFromBuffer(this.foliateView, arrayBuffer, file.name);
+			this.attachPaginatorScrollListener();
 			this.applyFoliateLayout();
 			this.tocEntries = this.buildFoliateTocEntries(this.foliateView.book?.toc ?? []);
 			this.applyFoliateAppearance();
@@ -998,39 +1000,16 @@ private contextMenuEl: HTMLElement | null = null;
 	private handleRelocated(detail: FoliateRelocateDetail): void {
 		const cfi = normalizeCfi(detail?.cfi);
 		const percent = normalizePercent(detail?.fraction ?? this.currentPercent);
-		const spineIndex = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
+		// foliate view 的 relocate detail 中，section index 嵌套在 section.current 里
+		// （来自 SectionProgress.getProgress 返回的 { section: { current: index } }）
+		// paginator 原始 relocate 事件有顶层 index，但 view.js #onRelocate 重新包装后丢失了
+		const rawIndex = detail?.section?.current ?? detail?.index;
+		const spineIndex = typeof rawIndex === "number" ? rawIndex : this.currentSectionIndex;
 
 		this.currentCfi = cfi || this.currentCfi;
 		this.currentSectionIndex = Number.isFinite(spineIndex) ? spineIndex : 0;
 		this.currentChapter = detail?.tocItem?.label ?? resolveChapterLabel(this.tocEntries, this.currentSectionIndex);
 		this.currentPercent = percent;
-
-		// 滚动模式：使用 renderer.start/end/viewSize 检测章节边界
-		// 条件：scrolled 模式 + 未锁定 + 距上次跨章超过 500ms
-		// 注意：不能用 detail.reason，foliate view.js #onRelocate 未传递 reason 字段
-		if (this.currentFlowMode === "scrolled" && !this.scrolledTransitionLock) {
-			if (Date.now() - this.lastSectionNavTime >= 500) {
-				// eslint-disable-next-line @typescript-eslint/no-explicit-any
-				const r = this.foliateView?.renderer as any;
-				if (r && typeof r.start === "number" && typeof r.end === "number" && typeof r.viewSize === "number") {
-					const sections = this.foliateView?.book?.sections;
-					const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
-
-					// 到达底部（与 foliate #scrollNext 相同条件：viewSize - end <= 2）
-					if (r.viewSize - r.end <= 2 && this.currentSectionIndex < maxIndex) {
-						this.scrolledTransitionLock = true;
-						this.lastSectionNavTime = Date.now();
-						this.nextPage();
-					}
-					// 到达顶部（与 foliate #scrollPrev 相同条件：start <= 0）
-					else if (r.start <= 0 && this.currentSectionIndex > 0) {
-						this.scrolledTransitionLock = true;
-						this.lastSectionNavTime = Date.now();
-						this.prevPage();
-					}
-				}
-			}
-		}
 
 		this.updateProgressBar(percent);
 		this.debouncedSaveProgress(this.currentCfi, percent);
@@ -1288,6 +1267,81 @@ private contextMenuEl: HTMLElement | null = null;
 		}
 		const action = this.foliateView.prev ?? this.foliateView.goLeft;
 		void action?.call(this.foliateView);
+	}
+
+	/**
+	 * 监听 paginator 的 scroll 事件，在滚动模式下驱动跨章翻页。
+	 *
+	 * foliate-js paginator 在 #container 每次滚动后立即 dispatchEvent(new Event('scroll'))
+	 * 到自身（paginator.js:551），此时 renderer.start/end/viewSize 已是终值。
+	 *
+	 * 核心问题：foliate 的 #scrollPrev 在 scrolled 模式下，当 start > 0 时只执行章内
+	 * 滚动到 0（#scrollTo(0)），不跨章；需要第二次 prev() 调用才跨章。但单次防抖会
+	 * 阻止第二次 scroll 事件触发 handler，导致用户卡在章节顶部。
+	 *
+	 * 修复方案：在 handler 中用 async 逻辑——第一次 prev()/next() 让 foliate 完成
+	 * 章内滚动，await 完成后检查 currentSectionIndex 是否变化；如果没变（说明只是
+	 * 章内滚动），立即再调一次 prev()/next() 跨章。用 navigating 标志替代防抖，
+	 * 在跨章完成后设 300ms 冷却防止新章节的 scroll 事件触发反方向翻页。
+	 */
+	private attachPaginatorScrollListener(): void {
+		if (!this.foliateView?.renderer) return;
+
+		// 清理旧监听
+		if (this.paginatorScrollCleanup) {
+			this.paginatorScrollCleanup();
+			this.paginatorScrollCleanup = null;
+		}
+
+		const renderer = this.foliateView.renderer as unknown as HTMLElement;
+		const handler = () => {
+			if (this.currentFlowMode !== "scrolled") return;
+			if (this.scrolledNavigating) return;
+
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const r = this.foliateView?.renderer as any;
+			if (!r || typeof r.start !== "number" || typeof r.end !== "number" || typeof r.viewSize !== "number") return;
+
+			const atBottom = r.viewSize - r.end <= 2;
+			const atTop = r.start <= 2;
+			if (!atBottom && !atTop) return;
+
+			const sections = this.foliateView?.book?.sections;
+			const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
+
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			const view = this.foliateView as any;
+			const prevFn = view.prev ?? view.goLeft;
+			const nextFn = view.next ?? view.goRight;
+
+			if (atBottom && this.currentSectionIndex < maxIndex && typeof nextFn === "function") {
+				this.scrolledNavigating = true;
+				void (async () => {
+					const sectionBefore = this.currentSectionIndex;
+					await nextFn.call(view);
+					// 如果第一次没跨章（只是章内滚动到底），再调一次跨章
+					if (this.currentSectionIndex === sectionBefore) {
+						await nextFn.call(view);
+					}
+					// 跨章完成后设冷却，防止新章节 scroll 事件触发反方向
+					window.setTimeout(() => { this.scrolledNavigating = false; }, 300);
+				})();
+			} else if (atTop && this.currentSectionIndex > 0 && typeof prevFn === "function") {
+				this.scrolledNavigating = true;
+				void (async () => {
+					const sectionBefore = this.currentSectionIndex;
+					await prevFn.call(view);
+					// 如果第一次没跨章（只是章内滚动到顶），再调一次跨章
+					if (this.currentSectionIndex === sectionBefore) {
+						await prevFn.call(view);
+					}
+					window.setTimeout(() => { this.scrolledNavigating = false; }, 300);
+				})();
+			}
+		};
+
+		renderer.addEventListener("scroll", handler);
+		this.paginatorScrollCleanup = () => renderer.removeEventListener("scroll", handler);
 	}
 
 	// ================================================================
@@ -1609,7 +1663,13 @@ private contextMenuEl: HTMLElement | null = null;
 			this.foliateView = null;
 		}
 
-		this.scrolledTransitionLock = false;
+		if (this.paginatorScrollCleanup) {
+			this.paginatorScrollCleanup();
+			this.paginatorScrollCleanup = null;
+		}
+
+		this.scrolledNavigating = false;
+
 		this.renderedAnnotationMeta.clear();
 
 		if (this.readerContainerEl) {
@@ -1655,8 +1715,6 @@ private contextMenuEl: HTMLElement | null = null;
 		const index = typeof detail.index === "number" ? detail.index : this.currentSectionIndex;
 		this.loadedSectionDocs.set(doc, index);
 		this.currentLoadedDoc = doc;
-		this.scrolledTransitionLock = false; // 新 section 加载完毕，释放跨章过渡锁
-		this.lastSectionNavTime = Date.now(); // 重置时间戳，防止加载后 500ms 内的 relocate 误触发
 		stripScriptsFromDocument(doc);
 		void inlineBlockedStylesheets({ document: doc });
 		this.attachSelectionListeners(doc);
