@@ -12240,6 +12240,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       void inlineBlockedStylesheets({ document: doc });
       this.attachSelectionListeners(doc);
       this.handleRendered();
+      if (import_obsidian12.Platform.isMobile) {
+        doc.addEventListener("click", (e3) => this.handleReaderAreaClick(e3));
+      }
     };
     this.handleFoliateRelocate = (event) => {
       this.handleRelocated(event.detail ?? {});
@@ -12361,6 +12364,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.progressEl = this.contentEl.createDiv({ cls: "yh-epub-progress" });
     this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
+    this.readerContainerEl.addEventListener("click", (event) => this.handleReaderAreaClick(event));
   }
   /**
    * 监听 Obsidian 原生主题变化（亮/暗切换、主题更换、CSS snippet 变更）。
@@ -12573,6 +12577,19 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     if (this.sidebarOpen) {
       this.renderSidebar();
     }
+  }
+  /**
+   * 移动端：点击阅读区域时关闭目录面板。
+   * 只在 Platform.isMobile 为 true 时生效。
+   */
+  handleReaderAreaClick(event) {
+    if (!import_obsidian12.Platform.isMobile || !this.sidebarOpen) {
+      return;
+    }
+    if (event.target instanceof Node && this.sidebarContainerEl.contains(event.target)) {
+      return;
+    }
+    this.toggleSidebar();
   }
   /**
    * 渲染侧边栏内容（目录）。

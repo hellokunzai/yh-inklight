@@ -10,7 +10,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
-import { FileView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { FileView, Notice, Platform, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 
 import {
 	ANNOTATION_COLORS,
@@ -353,6 +353,7 @@ private contextMenuEl: HTMLElement | null = null;
 
 		this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
 		this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
+		this.readerContainerEl.addEventListener("click", (event) => this.handleReaderAreaClick(event));
 	}
 
 	/**
@@ -608,6 +609,21 @@ private contextMenuEl: HTMLElement | null = null;
 		if (this.sidebarOpen) {
 			this.renderSidebar();
 		}
+	}
+
+	/**
+	 * 移动端：点击阅读区域时关闭目录面板。
+	 * 只在 Platform.isMobile 为 true 时生效。
+	 */
+	private handleReaderAreaClick(event: Event): void {
+		if (!Platform.isMobile || !this.sidebarOpen) {
+			return;
+		}
+		// 如果点击的是目录面板内部，不关闭
+		if (event.target instanceof Node && this.sidebarContainerEl.contains(event.target as Node)) {
+			return;
+		}
+		this.toggleSidebar();
 	}
 
 	/**
@@ -1828,6 +1844,11 @@ private contextMenuEl: HTMLElement | null = null;
 		void inlineBlockedStylesheets({ document: doc });
 		this.attachSelectionListeners(doc);
 		this.handleRendered();
+
+		// 移动端：点击 iframe 内阅读区域关闭目录面板
+		if (Platform.isMobile) {
+			doc.addEventListener("click", (e) => this.handleReaderAreaClick(e));
+		}
 	};
 
 	private handleFoliateRelocate = (event: Event): void => {
