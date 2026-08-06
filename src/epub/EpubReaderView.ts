@@ -329,7 +329,7 @@ private contextMenuEl: HTMLElement | null = null;
 		this.toolbarOverflowEl = null;
 
 		this.toolbarEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar" });
-		this.toolbarOverflowEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
+		this.toolbarOverflowEl = this.toolbarEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
 
 		const body = this.contentEl.createDiv({ cls: "yh-epub-body" });
 
@@ -392,7 +392,15 @@ private contextMenuEl: HTMLElement | null = null;
 	 * 工具栏固定为一行，装不下的按钮会自动移入“更多”下拉菜单。
 	 */
 	private renderToolbar(): void {
-		this.toolbarEl.empty();
+		// 只移除已有的按钮和色块容器，保留 overflow menu（它现在是 toolbarEl 的子元素）
+		const children = Array.from(this.toolbarEl.children);
+		for (const child of children) {
+			if (child === this.toolbarOverflowEl) continue;
+			if (child.hasClass("yh-epub-toolbar-btn") || child.hasClass("yh-epub-theme-swatches")) {
+				child.remove();
+			}
+		}
+
 		this.toolbarItems = [];
 		if (this.toolbarOverflowEl) {
 			this.toolbarOverflowEl.empty();
@@ -419,6 +427,8 @@ private contextMenuEl: HTMLElement | null = null;
 			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),
 			createBtn({ text: "A-", title: "缩小字号", onClick: () => this.changeFontSize(-1) }),
 			createBtn({ text: "A+", title: "放大字号", onClick: () => this.changeFontSize(1) }),
+			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
+			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
 			this.renderThemeSwatches(),
 			createBtn({ icon: "search", title: "搜索全文", onClick: () => this.toggleToolbarSearch() }),
 			createBtn({
@@ -426,8 +436,6 @@ private contextMenuEl: HTMLElement | null = null;
 				title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页",
 				onClick: () => this.toggleFlowMode(),
 			}),
-			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
-			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
 		);
 
 		this.toolbarOverflowBtn = createBtn({
@@ -446,6 +454,11 @@ private contextMenuEl: HTMLElement | null = null;
 		}
 		if (this.toolbarOverflowBtn) {
 			this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+		}
+
+		// 确保 overflow menu 始终在最后
+		if (this.toolbarOverflowEl) {
+			this.toolbarEl.appendChild(this.toolbarOverflowEl);
 		}
 
 		this.setupToolbarOverflow();

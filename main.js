@@ -12345,7 +12345,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.toolbarOverflowBtn = null;
     this.toolbarOverflowEl = null;
     this.toolbarEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar" });
-    this.toolbarOverflowEl = this.contentEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
+    this.toolbarOverflowEl = this.toolbarEl.createDiv({ cls: "yh-epub-toolbar-overflow-menu" });
     const body = this.contentEl.createDiv({ cls: "yh-epub-body" });
     this.sidebarContainerEl = body.createDiv({ cls: "yh-epub-sidebar" });
     this.sidebarContainerEl.toggleClass("is-open", this.sidebarOpen);
@@ -12394,7 +12394,13 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    * 工具栏固定为一行，装不下的按钮会自动移入“更多”下拉菜单。
    */
   renderToolbar() {
-    this.toolbarEl.empty();
+    const children = Array.from(this.toolbarEl.children);
+    for (const child of children) {
+      if (child === this.toolbarOverflowEl) continue;
+      if (child.hasClass("yh-epub-toolbar-btn") || child.hasClass("yh-epub-theme-swatches")) {
+        child.remove();
+      }
+    }
     this.toolbarItems = [];
     if (this.toolbarOverflowEl) {
       this.toolbarOverflowEl.empty();
@@ -12414,15 +12420,15 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
       createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
       createBtn({ text: "A+", title: "\u653E\u5927\u5B57\u53F7", onClick: () => this.changeFontSize(1) }),
+      createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
+      createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() }),
       this.renderThemeSwatches(),
       createBtn({ icon: "search", title: "\u641C\u7D22\u5168\u6587", onClick: () => this.toggleToolbarSearch() }),
       createBtn({
         icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "scroll",
         title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875",
         onClick: () => this.toggleFlowMode()
-      }),
-      createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
-      createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() })
+      })
     );
     this.toolbarOverflowBtn = createBtn({
       icon: "more-vertical",
@@ -12438,6 +12444,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     }
     if (this.toolbarOverflowBtn) {
       this.toolbarEl.appendChild(this.toolbarOverflowBtn);
+    }
+    if (this.toolbarOverflowEl) {
+      this.toolbarEl.appendChild(this.toolbarOverflowEl);
     }
     this.setupToolbarOverflow();
     this.layoutToolbarOverflow();
