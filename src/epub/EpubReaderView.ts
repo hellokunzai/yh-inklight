@@ -427,15 +427,15 @@ private contextMenuEl: HTMLElement | null = null;
 			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),
 			createBtn({ text: "A-", title: "缩小字号", onClick: () => this.changeFontSize(-1) }),
 			createBtn({ text: "A+", title: "放大字号", onClick: () => this.changeFontSize(1) }),
-			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
-			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
-			this.renderThemeSwatches(),
 			createBtn({ icon: "search", title: "搜索全文", onClick: () => this.toggleToolbarSearch() }),
 			createBtn({
 				icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "scroll",
 				title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页",
 				onClick: () => this.toggleFlowMode(),
 			}),
+			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
+			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
+			this.renderThemeSwatches(),
 		);
 
 		this.toolbarOverflowBtn = createBtn({

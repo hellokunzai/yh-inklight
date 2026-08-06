@@ -12420,15 +12420,15 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
       createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
       createBtn({ text: "A+", title: "\u653E\u5927\u5B57\u53F7", onClick: () => this.changeFontSize(1) }),
-      createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
-      createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() }),
-      this.renderThemeSwatches(),
       createBtn({ icon: "search", title: "\u641C\u7D22\u5168\u6587", onClick: () => this.toggleToolbarSearch() }),
       createBtn({
         icon: this.currentFlowMode === "paginated" ? "lines-of-text" : "scroll",
         title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875",
         onClick: () => this.toggleFlowMode()
-      })
+      }),
+      createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
+      createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() }),
+      this.renderThemeSwatches()
     );
     this.toolbarOverflowBtn = createBtn({
       icon: "more-vertical",
