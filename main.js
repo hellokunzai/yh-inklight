@@ -12208,7 +12208,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.wheelDebounceTimer = null;
     /** 滚动模式下跨章导航进行中标志，防止重入 */
     this.scrolledNavigating = false;
-    /** 清理 paginator scroll 事件监听 */
+    /** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
+    this.scrolledNavDirection = null;
+    /** 清理 paginator scroll/touch/wheel 事件监听 */
     this.paginatorScrollCleanup = null;
     this.contextMenuDismissTimer = null;
     this.visibilityHandler = null;
@@ -13140,19 +13142,21 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     void action?.call(this.foliateView);
   }
   /**
-   * 监听 paginator 的 scroll 事件，在滚动模式下驱动跨章翻页。
+   * 监听 paginator 的 scroll/touchmove/wheel 事件，在滚动模式下驱动跨章翻页。
    *
-   * foliate-js paginator 在 #container 每次滚动后立即 dispatchEvent(new Event('scroll'))
-   * 到自身（paginator.js:551），此时 renderer.start/end/viewSize 已是终值。
+   * 三路信号互补：
+   * - scroll：scrollTop 变化时触发（用户滚动**到**边界）
+   * - touchmove：触摸滑动时触发，即使 scrollTop 不变（用户**已在**边界继续滑）
+   * - wheel：桌面端滚轮，即使 scrollTop 不变（用户**已在**边界继续滚）
    *
-   * 核心问题：foliate 的 #scrollPrev 在 scrolled 模式下，当 start > 0 时只执行章内
-   * 滚动到 0（#scrollTo(0)），不跨章；需要第二次 prev() 调用才跨章。但单次防抖会
-   * 阻止第二次 scroll 事件触发 handler，导致用户卡在章节顶部。
+   * 核心问题：scroll 事件只在 scrollTop 变化时触发。用户已在边界时继续滑动，
+   * scrollTop 不变，无 scroll 事件，handler 不触发——用户必须反方向滑一下再滑
+   * 回来才能翻页。touchmove/wheel 事件不依赖 scrollTop 变化，弥补此盲区。
    *
-   * 修复方案：在 handler 中用 async 逻辑——第一次 prev()/next() 让 foliate 完成
-   * 章内滚动，await 完成后检查 currentSectionIndex 是否变化；如果没变（说明只是
-   * 章内滚动），立即再调一次 prev()/next() 跨章。用 navigating 标志替代防抖，
-   * 在跨章完成后设 300ms 冷却防止新章节的 scroll 事件触发反方向翻页。
+   * foliate #scrollPrev 在 start > 0 时只章内滚动到 0，需第二次 prev() 才跨章。
+   * handler 中用 async 两步调用处理此逻辑。
+   *
+   * 方向冷却：跨章后 300ms 内阻止反方向触发，防止新章节边界事件导致来回跳。
    */
   attachPaginatorScrollListener() {
     if (!this.foliateView?.renderer) return;
@@ -13161,47 +13165,115 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       this.paginatorScrollCleanup = null;
     }
     const renderer = this.foliateView.renderer;
-    const handler = () => {
+    const view = this.foliateView;
+    const prevFn = view.prev ?? view.goLeft;
+    const nextFn = view.next ?? view.goRight;
+    const getBounds = () => {
+      const r3 = this.foliateView?.renderer;
+      if (!r3 || typeof r3.start !== "number" || typeof r3.end !== "number" || typeof r3.viewSize !== "number")
+        return null;
+      return {
+        atBottom: r3.viewSize - r3.end <= 2,
+        atTop: r3.start <= 2,
+        maxIndex: Array.isArray(this.foliateView?.book?.sections) ? this.foliateView.book.sections.length - 1 : 0
+      };
+    };
+    const navigate = (direction) => {
+      if (this.scrolledNavigating) return;
+      if (this.currentFlowMode !== "scrolled") return;
+      const bounds = getBounds();
+      if (!bounds) return;
+      if (direction === "next") {
+        if (!bounds.atBottom || this.currentSectionIndex >= bounds.maxIndex) return;
+        if (this.scrolledNavDirection === "prev") return;
+        if (typeof nextFn !== "function") return;
+      } else {
+        if (!bounds.atTop || this.currentSectionIndex <= 0) return;
+        if (this.scrolledNavDirection === "next") return;
+        if (typeof prevFn !== "function") return;
+      }
+      this.scrolledNavigating = true;
+      this.scrolledNavDirection = direction;
+      const fn = direction === "next" ? nextFn : prevFn;
+      void (async () => {
+        const sectionBefore = this.currentSectionIndex;
+        await fn.call(view);
+        if (this.currentSectionIndex === sectionBefore) {
+          await fn.call(view);
+        }
+        window.setTimeout(() => {
+          this.scrolledNavigating = false;
+          this.scrolledNavDirection = null;
+        }, 300);
+      })();
+    };
+    const scrollHandler = () => {
       if (this.currentFlowMode !== "scrolled") return;
       if (this.scrolledNavigating) return;
-      const r3 = this.foliateView?.renderer;
-      if (!r3 || typeof r3.start !== "number" || typeof r3.end !== "number" || typeof r3.viewSize !== "number") return;
-      const atBottom = r3.viewSize - r3.end <= 2;
-      const atTop = r3.start <= 2;
-      if (!atBottom && !atTop) return;
-      const sections = this.foliateView?.book?.sections;
-      const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
-      const view = this.foliateView;
-      const prevFn = view.prev ?? view.goLeft;
-      const nextFn = view.next ?? view.goRight;
-      if (atBottom && this.currentSectionIndex < maxIndex && typeof nextFn === "function") {
-        this.scrolledNavigating = true;
-        void (async () => {
-          const sectionBefore = this.currentSectionIndex;
-          await nextFn.call(view);
-          if (this.currentSectionIndex === sectionBefore) {
-            await nextFn.call(view);
-          }
-          window.setTimeout(() => {
-            this.scrolledNavigating = false;
-          }, 300);
-        })();
-      } else if (atTop && this.currentSectionIndex > 0 && typeof prevFn === "function") {
-        this.scrolledNavigating = true;
-        void (async () => {
-          const sectionBefore = this.currentSectionIndex;
-          await prevFn.call(view);
-          if (this.currentSectionIndex === sectionBefore) {
-            await prevFn.call(view);
-          }
-          window.setTimeout(() => {
-            this.scrolledNavigating = false;
-          }, 300);
-        })();
+      const bounds = getBounds();
+      if (!bounds || !bounds.atBottom && !bounds.atTop) return;
+      if (bounds.atBottom) navigate("next");
+      else if (bounds.atTop) navigate("prev");
+    };
+    const wheelHandler = (e3) => {
+      if (this.currentFlowMode !== "scrolled") return;
+      if (this.scrolledNavigating) return;
+      const bounds = getBounds();
+      if (!bounds || !bounds.atBottom && !bounds.atTop) return;
+      if (bounds.atBottom && e3.deltaY > 0) navigate("next");
+      else if (bounds.atTop && e3.deltaY < 0) navigate("prev");
+    };
+    let touchStartY = 0;
+    let touchActive = false;
+    const TOUCH_THRESHOLD = 15;
+    const touchStartHandler = (e3) => {
+      if (e3.touches.length !== 1) {
+        touchActive = false;
+        return;
+      }
+      touchStartY = e3.touches[0].clientY;
+      touchActive = true;
+    };
+    const touchMoveHandler = (e3) => {
+      if (!touchActive || e3.touches.length !== 1) return;
+      if (this.currentFlowMode !== "scrolled") return;
+      if (this.scrolledNavigating) return;
+      const bounds = getBounds();
+      if (!bounds || !bounds.atBottom && !bounds.atTop) return;
+      const currentY = e3.touches[0].clientY;
+      const delta = touchStartY - currentY;
+      if (bounds.atBottom && delta > TOUCH_THRESHOLD) {
+        touchActive = false;
+        navigate("next");
+      } else if (bounds.atTop && delta < -TOUCH_THRESHOLD) {
+        touchActive = false;
+        navigate("prev");
       }
     };
-    renderer.addEventListener("scroll", handler);
-    this.paginatorScrollCleanup = () => renderer.removeEventListener("scroll", handler);
+    renderer.addEventListener("scroll", scrollHandler);
+    renderer.addEventListener("wheel", wheelHandler, { passive: true });
+    renderer.addEventListener("touchstart", touchStartHandler, { passive: true });
+    renderer.addEventListener("touchmove", touchMoveHandler, { passive: true });
+    const iframeDocs = [];
+    const loadHandler = (e3) => {
+      const doc = e3.detail?.doc;
+      if (!doc || iframeDocs.includes(doc)) return;
+      iframeDocs.push(doc);
+      doc.addEventListener("touchstart", touchStartHandler, { passive: true });
+      doc.addEventListener("touchmove", touchMoveHandler, { passive: true });
+    };
+    renderer.addEventListener("load", loadHandler);
+    this.paginatorScrollCleanup = () => {
+      renderer.removeEventListener("scroll", scrollHandler);
+      renderer.removeEventListener("wheel", wheelHandler);
+      renderer.removeEventListener("touchstart", touchStartHandler);
+      renderer.removeEventListener("touchmove", touchMoveHandler);
+      renderer.removeEventListener("load", loadHandler);
+      for (const doc of iframeDocs) {
+        doc.removeEventListener("touchstart", touchStartHandler);
+        doc.removeEventListener("touchmove", touchMoveHandler);
+      }
+    };
   }
   // ================================================================
   // 导航
@@ -13489,6 +13561,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       this.paginatorScrollCleanup = null;
     }
     this.scrolledNavigating = false;
+    this.scrolledNavDirection = null;
     this.renderedAnnotationMeta.clear();
     if (this.readerContainerEl) {
       this.readerContainerEl.empty();

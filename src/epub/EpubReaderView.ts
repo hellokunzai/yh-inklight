@@ -186,7 +186,9 @@ private contextMenuEl: HTMLElement | null = null;
 	private wheelDebounceTimer: number | null = null;
 	/** 滚动模式下跨章导航进行中标志，防止重入 */
 	private scrolledNavigating = false;
-	/** 清理 paginator scroll 事件监听 */
+	/** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
+	private scrolledNavDirection: "next" | "prev" | null = null;
+	/** 清理 paginator scroll/touch/wheel 事件监听 */
 	private paginatorScrollCleanup: (() => void) | null = null;
 	private contextMenuDismissTimer: number | null = null;
 	private visibilityHandler: (() => void) | null = null;
@@ -1270,19 +1272,21 @@ private contextMenuEl: HTMLElement | null = null;
 	}
 
 	/**
-	 * 监听 paginator 的 scroll 事件，在滚动模式下驱动跨章翻页。
+	 * 监听 paginator 的 scroll/touchmove/wheel 事件，在滚动模式下驱动跨章翻页。
 	 *
-	 * foliate-js paginator 在 #container 每次滚动后立即 dispatchEvent(new Event('scroll'))
-	 * 到自身（paginator.js:551），此时 renderer.start/end/viewSize 已是终值。
+	 * 三路信号互补：
+	 * - scroll：scrollTop 变化时触发（用户滚动**到**边界）
+	 * - touchmove：触摸滑动时触发，即使 scrollTop 不变（用户**已在**边界继续滑）
+	 * - wheel：桌面端滚轮，即使 scrollTop 不变（用户**已在**边界继续滚）
 	 *
-	 * 核心问题：foliate 的 #scrollPrev 在 scrolled 模式下，当 start > 0 时只执行章内
-	 * 滚动到 0（#scrollTo(0)），不跨章；需要第二次 prev() 调用才跨章。但单次防抖会
-	 * 阻止第二次 scroll 事件触发 handler，导致用户卡在章节顶部。
+	 * 核心问题：scroll 事件只在 scrollTop 变化时触发。用户已在边界时继续滑动，
+	 * scrollTop 不变，无 scroll 事件，handler 不触发——用户必须反方向滑一下再滑
+	 * 回来才能翻页。touchmove/wheel 事件不依赖 scrollTop 变化，弥补此盲区。
 	 *
-	 * 修复方案：在 handler 中用 async 逻辑——第一次 prev()/next() 让 foliate 完成
-	 * 章内滚动，await 完成后检查 currentSectionIndex 是否变化；如果没变（说明只是
-	 * 章内滚动），立即再调一次 prev()/next() 跨章。用 navigating 标志替代防抖，
-	 * 在跨章完成后设 300ms 冷却防止新章节的 scroll 事件触发反方向翻页。
+	 * foliate #scrollPrev 在 start > 0 时只章内滚动到 0，需第二次 prev() 才跨章。
+	 * handler 中用 async 两步调用处理此逻辑。
+	 *
+	 * 方向冷却：跨章后 300ms 内阻止反方向触发，防止新章节边界事件导致来回跳。
 	 */
 	private attachPaginatorScrollListener(): void {
 		if (!this.foliateView?.renderer) return;
@@ -1294,54 +1298,145 @@ private contextMenuEl: HTMLElement | null = null;
 		}
 
 		const renderer = this.foliateView.renderer as unknown as HTMLElement;
-		const handler = () => {
-			if (this.currentFlowMode !== "scrolled") return;
-			if (this.scrolledNavigating) return;
 
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const view = this.foliateView as any;
+		const prevFn = view.prev ?? view.goLeft;
+		const nextFn = view.next ?? view.goRight;
+
+		/** 读取当前边界状态 */
+		const getBounds = () => {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			const r = this.foliateView?.renderer as any;
-			if (!r || typeof r.start !== "number" || typeof r.end !== "number" || typeof r.viewSize !== "number") return;
+			if (!r || typeof r.start !== "number" || typeof r.end !== "number" || typeof r.viewSize !== "number")
+				return null;
+			return {
+				atBottom: r.viewSize - r.end <= 2,
+				atTop: r.start <= 2,
+				maxIndex: Array.isArray(this.foliateView?.book?.sections)
+					? (this.foliateView!.book!.sections!.length - 1)
+					: 0,
+			};
+		};
 
-			const atBottom = r.viewSize - r.end <= 2;
-			const atTop = r.start <= 2;
-			if (!atBottom && !atTop) return;
+		/** 执行跨章导航（next 或 prev），含两步调用和方向冷却 */
+		const navigate = (direction: "next" | "prev") => {
+			if (this.scrolledNavigating) return;
+			if (this.currentFlowMode !== "scrolled") return;
 
-			const sections = this.foliateView?.book?.sections;
-			const maxIndex = Array.isArray(sections) ? sections.length - 1 : 0;
+			const bounds = getBounds();
+			if (!bounds) return;
 
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const view = this.foliateView as any;
-			const prevFn = view.prev ?? view.goLeft;
-			const nextFn = view.next ?? view.goRight;
+			// 方向冷却：刚从反方向翻过来时，忽略此方向
+			if (direction === "next") {
+				if (!bounds.atBottom || this.currentSectionIndex >= bounds.maxIndex) return;
+				if (this.scrolledNavDirection === "prev") return;
+				if (typeof nextFn !== "function") return;
+			} else {
+				if (!bounds.atTop || this.currentSectionIndex <= 0) return;
+				if (this.scrolledNavDirection === "next") return;
+				if (typeof prevFn !== "function") return;
+			}
 
-			if (atBottom && this.currentSectionIndex < maxIndex && typeof nextFn === "function") {
-				this.scrolledNavigating = true;
-				void (async () => {
-					const sectionBefore = this.currentSectionIndex;
-					await nextFn.call(view);
-					// 如果第一次没跨章（只是章内滚动到底），再调一次跨章
-					if (this.currentSectionIndex === sectionBefore) {
-						await nextFn.call(view);
-					}
-					// 跨章完成后设冷却，防止新章节 scroll 事件触发反方向
-					window.setTimeout(() => { this.scrolledNavigating = false; }, 300);
-				})();
-			} else if (atTop && this.currentSectionIndex > 0 && typeof prevFn === "function") {
-				this.scrolledNavigating = true;
-				void (async () => {
-					const sectionBefore = this.currentSectionIndex;
-					await prevFn.call(view);
-					// 如果第一次没跨章（只是章内滚动到顶），再调一次跨章
-					if (this.currentSectionIndex === sectionBefore) {
-						await prevFn.call(view);
-					}
-					window.setTimeout(() => { this.scrolledNavigating = false; }, 300);
-				})();
+			this.scrolledNavigating = true;
+			this.scrolledNavDirection = direction;
+
+			const fn = direction === "next" ? nextFn : prevFn;
+			void (async () => {
+				const sectionBefore = this.currentSectionIndex;
+				await fn.call(view);
+				// 如果第一次没跨章（只是章内滚动到边界），再调一次跨章
+				if (this.currentSectionIndex === sectionBefore) {
+					await fn.call(view);
+				}
+				// 跨章完成后设冷却，防止新章节边界事件触发反方向
+				window.setTimeout(() => {
+					this.scrolledNavigating = false;
+					this.scrolledNavDirection = null;
+				}, 300);
+			})();
+		};
+
+		// 1. scroll 事件：scrollTop 变化时触发（滚动到边界）
+		const scrollHandler = () => {
+			if (this.currentFlowMode !== "scrolled") return;
+			if (this.scrolledNavigating) return;
+			const bounds = getBounds();
+			if (!bounds || (!bounds.atBottom && !bounds.atTop)) return;
+			if (bounds.atBottom) navigate("next");
+			else if (bounds.atTop) navigate("prev");
+		};
+
+		// 2. wheel 事件：桌面端滚轮，即使 scrollTop 不变也触发（已在边界）
+		const wheelHandler = (e: WheelEvent) => {
+			if (this.currentFlowMode !== "scrolled") return;
+			if (this.scrolledNavigating) return;
+			const bounds = getBounds();
+			if (!bounds || (!bounds.atBottom && !bounds.atTop)) return;
+			if (bounds.atBottom && e.deltaY > 0) navigate("next");
+			else if (bounds.atTop && e.deltaY < 0) navigate("prev");
+		};
+
+		// 3. touchmove 事件：触摸滑动，即使 scrollTop 不变也触发（已在边界）
+		let touchStartY = 0;
+		let touchActive = false;
+		const TOUCH_THRESHOLD = 15;
+
+		const touchStartHandler = (e: TouchEvent) => {
+			if (e.touches.length !== 1) {
+				touchActive = false;
+				return;
+			}
+			touchStartY = e.touches[0].clientY;
+			touchActive = true;
+		};
+		const touchMoveHandler = (e: TouchEvent) => {
+			if (!touchActive || e.touches.length !== 1) return;
+			if (this.currentFlowMode !== "scrolled") return;
+			if (this.scrolledNavigating) return;
+			const bounds = getBounds();
+			if (!bounds || (!bounds.atBottom && !bounds.atTop)) return;
+
+			const currentY = e.touches[0].clientY;
+			const delta = touchStartY - currentY; // 正=手指上移=向下滚动=下一章
+
+			if (bounds.atBottom && delta > TOUCH_THRESHOLD) {
+				touchActive = false; // 防止同一次触摸重复触发
+				navigate("next");
+			} else if (bounds.atTop && delta < -TOUCH_THRESHOLD) {
+				touchActive = false;
+				navigate("prev");
 			}
 		};
 
-		renderer.addEventListener("scroll", handler);
-		this.paginatorScrollCleanup = () => renderer.removeEventListener("scroll", handler);
+		// 注册 renderer 上的监听
+		renderer.addEventListener("scroll", scrollHandler);
+		renderer.addEventListener("wheel", wheelHandler, { passive: true });
+		renderer.addEventListener("touchstart", touchStartHandler, { passive: true });
+		renderer.addEventListener("touchmove", touchMoveHandler, { passive: true });
+
+		// iframe 内的 touch 事件不会冒泡到父文档，需通过 load 事件拿到 doc 后单独监听
+		const iframeDocs: Document[] = [];
+		const loadHandler = (e: Event) => {
+			const doc = (e as CustomEvent).detail?.doc as Document | undefined;
+			if (!doc || iframeDocs.includes(doc)) return;
+			iframeDocs.push(doc);
+			doc.addEventListener("touchstart", touchStartHandler, { passive: true });
+			doc.addEventListener("touchmove", touchMoveHandler, { passive: true });
+		};
+		renderer.addEventListener("load", loadHandler);
+
+		this.paginatorScrollCleanup = () => {
+			renderer.removeEventListener("scroll", scrollHandler);
+			renderer.removeEventListener("wheel", wheelHandler);
+			renderer.removeEventListener("touchstart", touchStartHandler);
+			renderer.removeEventListener("touchmove", touchMoveHandler);
+			renderer.removeEventListener("load", loadHandler);
+			for (const doc of iframeDocs) {
+				doc.removeEventListener("touchstart", touchStartHandler);
+				doc.removeEventListener("touchmove", touchMoveHandler);
+			}
+		};
 	}
 
 	// ================================================================
@@ -1669,6 +1764,7 @@ private contextMenuEl: HTMLElement | null = null;
 		}
 
 		this.scrolledNavigating = false;
+		this.scrolledNavDirection = null;
 
 		this.renderedAnnotationMeta.clear();
 
