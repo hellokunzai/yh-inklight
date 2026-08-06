@@ -13287,6 +13287,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       iframeDocs.push(doc);
       doc.addEventListener("touchstart", touchStartHandler, { passive: true });
       doc.addEventListener("touchmove", touchMoveHandler, { passive: true });
+      doc.addEventListener("wheel", wheelHandler, { passive: true });
     };
     renderer.addEventListener("load", loadHandler);
     this.paginatorScrollCleanup = () => {
@@ -13298,6 +13299,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       for (const doc of iframeDocs) {
         doc.removeEventListener("touchstart", touchStartHandler);
         doc.removeEventListener("touchmove", touchMoveHandler);
+        doc.removeEventListener("wheel", wheelHandler);
       }
     };
   }

@@ -1444,7 +1444,7 @@ private contextMenuEl: HTMLElement | null = null;
 		renderer.addEventListener("touchstart", touchStartHandler, { passive: true });
 		renderer.addEventListener("touchmove", touchMoveHandler, { passive: true });
 
-		// iframe 内的 touch 事件不会冒泡到父文档，需通过 load 事件拿到 doc 后单独监听
+		// iframe 内的 touch/wheel 事件不会冒泡到父文档，需通过 load 事件拿到 doc 后单独监听
 		const iframeDocs: Document[] = [];
 		const loadHandler = (e: Event) => {
 			const doc = (e as CustomEvent).detail?.doc as Document | undefined;
@@ -1452,6 +1452,7 @@ private contextMenuEl: HTMLElement | null = null;
 			iframeDocs.push(doc);
 			doc.addEventListener("touchstart", touchStartHandler, { passive: true });
 			doc.addEventListener("touchmove", touchMoveHandler, { passive: true });
+			doc.addEventListener("wheel", wheelHandler, { passive: true });
 		};
 		renderer.addEventListener("load", loadHandler);
 
@@ -1464,6 +1465,7 @@ private contextMenuEl: HTMLElement | null = null;
 			for (const doc of iframeDocs) {
 				doc.removeEventListener("touchstart", touchStartHandler);
 				doc.removeEventListener("touchmove", touchMoveHandler);
+				doc.removeEventListener("wheel", wheelHandler);
 			}
 		};
 	}
