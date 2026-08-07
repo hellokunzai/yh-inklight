@@ -192,7 +192,7 @@ private contextMenuEl: HTMLElement | null = null;
 	private scrolledNavDirection: "next" | "prev" | null = null;
 
 	/** PC 端翻页模式：键盘翻页 / 滚轮翻页（互斥，默认键盘） */
-	private pcNavMode: "keyboard" | "wheel" = "keyboard";
+	private pcNavMode: "keyboard" | "wheel" = "wheel";
 	/** 移动端点按翻页开关（true=点按翻页，false=滑动翻页） */
 	private mobileTapEnabled = true;
 	/** 移动端 readerContainer 点击翻页监听清理函数 */
@@ -451,14 +451,13 @@ private contextMenuEl: HTMLElement | null = null;
 		// 导航模式按钮（PC: 键盘↔滚轮互斥切换；移动端: 点按↔滑动切换）
 		const keyNavBtn = createBtn({
 			icon: Platform.isMobile
-				? "hand"
+				? (this.mobileTapEnabled ? "hand" : "move")
 				: (this.pcNavMode === "keyboard" ? "keyboard" : "mouse"),
 			title: Platform.isMobile
 				? (this.mobileTapEnabled ? "切换为滑动翻页" : "切换为点按翻页")
 				: (this.pcNavMode === "keyboard" ? "切换为滚轮翻页" : "切换为键盘翻页"),
 			onClick: () => this.toggleKeyNav(),
 		});
-		keyNavBtn.toggleClass("is-dimmed", Platform.isMobile && !this.mobileTapEnabled);
 
 		this.toolbarItems.push(
 			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),

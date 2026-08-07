@@ -12213,7 +12213,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     /** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
     this.scrolledNavDirection = null;
     /** PC 端翻页模式：键盘翻页 / 滚轮翻页（互斥，默认键盘） */
-    this.pcNavMode = "keyboard";
+    this.pcNavMode = "wheel";
     /** 移动端点按翻页开关（true=点按翻页，false=滑动翻页） */
     this.mobileTapEnabled = true;
     /** 移动端 readerContainer 点击翻页监听清理函数 */
@@ -12445,11 +12445,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       return btn;
     };
     const keyNavBtn = createBtn({
-      icon: import_obsidian12.Platform.isMobile ? "hand" : this.pcNavMode === "keyboard" ? "keyboard" : "mouse",
+      icon: import_obsidian12.Platform.isMobile ? this.mobileTapEnabled ? "hand" : "move" : this.pcNavMode === "keyboard" ? "keyboard" : "mouse",
       title: import_obsidian12.Platform.isMobile ? this.mobileTapEnabled ? "\u5207\u6362\u4E3A\u6ED1\u52A8\u7FFB\u9875" : "\u5207\u6362\u4E3A\u70B9\u6309\u7FFB\u9875" : this.pcNavMode === "keyboard" ? "\u5207\u6362\u4E3A\u6EDA\u8F6E\u7FFB\u9875" : "\u5207\u6362\u4E3A\u952E\u76D8\u7FFB\u9875",
       onClick: () => this.toggleKeyNav()
     });
-    keyNavBtn.toggleClass("is-dimmed", import_obsidian12.Platform.isMobile && !this.mobileTapEnabled);
     this.toolbarItems.push(
       createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
       createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
