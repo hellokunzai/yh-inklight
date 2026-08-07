@@ -13123,12 +13123,17 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   // 键盘 & 滚轮导航
   // ================================================================
   /**
-   * 处理键盘导航事件（PC 端键盘翻页，仅 pcNavMode === "keyboard" 时生效）。
+   * 处理键盘导航事件（PC 端，键盘/滚轮互斥）。
    *
-   * 翻页模式：← 上一页 / → 下一页；Space 下一页 / Shift+Space 上一页；
-   *           PageUp/PageDown 同向翻页；Home 跳到书首，End 跳到书尾。
-   * 滚动模式：↑ 上一章 / ↓ 下一章；Home 跳到书首，End 跳到书尾；
-   *           其余按键交给 iframe 原生滚动。
+   * pcNavMode === "keyboard" 时生效：
+   *   翻页模式：← 上一页 / → 下一页；Space 下一页 / Shift+Space 上一页；
+   *             PageUp/PageDown 同向翻页；Home 跳到书首，End 跳到书尾。
+   *   滚动模式：↑ 上一章 / ↓ 下一章；Home 跳到书首，End 跳到书尾；
+   *             其余按键交给 iframe 原生滚动。
+   *
+   * pcNavMode === "wheel" 时：preventDefault 所有导航键（含方向键/Space/
+   *   PageUp/Down/Home/End），阻止滚动模式下的原生滚动和分页模式下 foliate
+   *   自身的键盘处理，确保滚轮模式下键盘完全不干预阅读。
    *
    * ⚠️ 阅读正文渲染在 foliate iframe 内，iframe 的键盘事件不会冒泡到父文档，
    *    因此除 contentEl 监听外，还需在 handleFoliateLoad 中把本方法挂到每个
@@ -13148,10 +13153,25 @@ var EpubReaderView = class extends import_obsidian12.FileView {
         return;
       }
     }
+    const isPaginated = this.currentFlowMode === "paginated";
     if (this.pcNavMode !== "keyboard") {
+      switch (event.key) {
+        case "ArrowUp":
+        case "ArrowDown":
+        case "ArrowLeft":
+        case "ArrowRight":
+        case " ":
+        case "PageUp":
+        case "PageDown":
+        case "Home":
+        case "End":
+          event.preventDefault();
+          break;
+        default:
+          break;
+      }
       return;
     }
-    const isPaginated = this.currentFlowMode === "paginated";
     switch (event.key) {
       case "ArrowLeft": {
         if (isPaginated) {
@@ -13283,18 +13303,25 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     }
   }
   /**
-   * 处理鼠标滚轮事件。
-   * - 分页模式：滚轮直接翻页，带防抖保护（受 pcNavMode 门控，仅滚轮模式生效）。
-   * - 滚动模式：不做拦截，交给 foliate 内部 #container 自然滚动；
-   *   跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
+   * 处理鼠标滚轮事件（PC 端，键盘/滚轮互斥）。
+   *
+   * pcNavMode === "wheel" 时生效：
+   *   分页模式：滚轮直接翻页，带防抖保护。
+   *   滚动模式：不拦截，交给 foliate 内部 #container 自然滚动；
+   *     跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
+   *
+   * pcNavMode === "keyboard" 时：preventDefault 阻止滚轮在两种模式下的
+   *   原生行为（分页模式无滚动，滚动模式阻止原生滚动），确保键盘模式下
+   *   滚轮完全不干预阅读。
    *
    * @param event - 滚轮事件
    */
   handleWheel(event) {
-    if (this.currentFlowMode !== "paginated") {
+    if (this.pcNavMode !== "wheel") {
+      event.preventDefault();
       return;
     }
-    if (this.pcNavMode !== "wheel") {
+    if (this.currentFlowMode !== "paginated") {
       return;
     }
     event.preventDefault();
