@@ -12440,7 +12440,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     };
     const keyNavBtn = createBtn({
       icon: import_obsidian12.Platform.isMobile ? "hand" : "keyboard",
-      title: import_obsidian12.Platform.isMobile ? this.keyNavEnabled ? "\u5173\u95ED\u70B9\u51FB\u7FFB\u9875" : "\u5F00\u542F\u70B9\u51FB\u7FFB\u9875" : this.keyNavEnabled ? "\u5173\u95ED\u952E\u76D8\u7FFB\u9875" : "\u5F00\u542F\u952E\u76D8\u7FFB\u9875",
+      title: import_obsidian12.Platform.isMobile ? this.keyNavEnabled ? "\u5207\u6362\u4E3A\u6ED1\u52A8\u7FFB\u9875" : "\u5207\u6362\u4E3A\u70B9\u6309\u7FFB\u9875" : this.keyNavEnabled ? "\u5173\u95ED\u952E\u76D8\u7FFB\u9875" : "\u5F00\u542F\u952E\u76D8\u7FFB\u9875",
       onClick: () => this.toggleKeyNav()
     });
     keyNavBtn.toggleClass("is-dimmed", !this.keyNavEnabled);
@@ -13576,13 +13576,16 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   }
   /**
    * 切换导航开关。
-   * PC 端控制键盘翻页，移动端控制点击翻页。
+   * PC 端控制键盘翻页，移动端控制点按/滑动翻页。
    */
   toggleKeyNav() {
     this.keyNavEnabled = !this.keyNavEnabled;
     this.renderToolbar();
-    const label = import_obsidian12.Platform.isMobile ? "\u70B9\u51FB\u7FFB\u9875" : "\u952E\u76D8\u7FFB\u9875";
-    new import_obsidian12.Notice(this.keyNavEnabled ? `${label}\u5DF2\u5F00\u542F` : `${label}\u5DF2\u5173\u95ED`);
+    if (import_obsidian12.Platform.isMobile) {
+      new import_obsidian12.Notice(this.keyNavEnabled ? "\u70B9\u6309\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u6ED1\u52A8\u7FFB\u9875\u5DF2\u5F00\u542F");
+    } else {
+      new import_obsidian12.Notice(this.keyNavEnabled ? "\u952E\u76D8\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u952E\u76D8\u7FFB\u9875\u5DF2\u5173\u95ED");
+    }
   }
   // ================================================================
   // ================================================================

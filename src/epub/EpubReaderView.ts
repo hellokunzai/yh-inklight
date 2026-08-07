@@ -450,7 +450,7 @@ private contextMenuEl: HTMLElement | null = null;
 		const keyNavBtn = createBtn({
 			icon: Platform.isMobile ? "hand" : "keyboard",
 			title: Platform.isMobile
-				? (this.keyNavEnabled ? "关闭点击翻页" : "开启点击翻页")
+				? (this.keyNavEnabled ? "切换为滑动翻页" : "切换为点按翻页")
 				: (this.keyNavEnabled ? "关闭键盘翻页" : "开启键盘翻页"),
 			onClick: () => this.toggleKeyNav(),
 		});
@@ -1791,13 +1791,16 @@ private contextMenuEl: HTMLElement | null = null;
 
 	/**
 	 * 切换导航开关。
-	 * PC 端控制键盘翻页，移动端控制点击翻页。
+	 * PC 端控制键盘翻页，移动端控制点按/滑动翻页。
 	 */
 	private toggleKeyNav(): void {
 		this.keyNavEnabled = !this.keyNavEnabled;
 		this.renderToolbar();
-		const label = Platform.isMobile ? "点击翻页" : "键盘翻页";
-		new Notice(this.keyNavEnabled ? `${label}已开启` : `${label}已关闭`);
+		if (Platform.isMobile) {
+			new Notice(this.keyNavEnabled ? "点按翻页已开启" : "滑动翻页已开启");
+		} else {
+			new Notice(this.keyNavEnabled ? "键盘翻页已开启" : "键盘翻页已关闭");
+		}
 	}
 
 	// ================================================================
