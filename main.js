@@ -12249,12 +12249,16 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       this.attachSelectionListeners(doc);
       this.attachKeyboardNavigation(doc);
       this.handleRendered();
+      requestAnimationFrame(() => this.focusActiveIframe());
       if (import_obsidian12.Platform.isMobile) {
         doc.addEventListener("click", (e3) => this.handleReaderAreaClick(e3));
       }
     };
     this.handleFoliateRelocate = (event) => {
       this.handleRelocated(event.detail ?? {});
+      if (!import_obsidian12.Platform.isMobile && this.currentFlowMode === "paginated") {
+        requestAnimationFrame(() => this.focusActiveIframe());
+      }
     };
     this.handleFoliateDrawAnnotation = (event) => {
       const detail = event.detail;
@@ -13852,6 +13856,29 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       return id === href || id === normalizedHref || id.endsWith(normalizedHref);
     });
     return index >= 0 ? index : null;
+  }
+  /**
+   * 聚焦当前活动的 foliate iframe，使键盘/滚轮导航无需先手动点击。
+   *
+   * 翻页模式（paginated）下 foliate next/prev 可能导致 iframe 焦点丢失，
+   * 在 load 和 relocate 事件后调用此方法恢复焦点。
+   * 不抢输入框（搜索框等）焦点，仅在安全时聚焦。
+   */
+  focusActiveIframe() {
+    const active = document.activeElement;
+    if (active) {
+      const tag = active.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || active.isContentEditable) {
+        return;
+      }
+    }
+    const doc = this.currentLoadedDoc;
+    if (!doc) return;
+    const win = doc.defaultView;
+    const frame = win?.frameElement;
+    if (frame instanceof HTMLIFrameElement) {
+      frame.focus();
+    }
   }
   attachSelectionListeners(doc) {
     if (this.documentSelectionCleanups.has(doc)) {

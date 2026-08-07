@@ -2117,6 +2117,10 @@ private contextMenuEl: HTMLElement | null = null;
 		this.attachKeyboardNavigation(doc);
 		this.handleRendered();
 
+		// 自动聚焦 iframe，使键盘/滚轮翻页无需先手动点击
+		// foliate 每次加载新 section 都会创建/复用 iframe，默认不自动获取焦点
+		requestAnimationFrame(() => this.focusActiveIframe());
+
 		// 移动端：点击 iframe 内阅读区域关闭目录面板
 		if (Platform.isMobile) {
 			doc.addEventListener("click", (e) => this.handleReaderAreaClick(e));
@@ -2125,7 +2129,41 @@ private contextMenuEl: HTMLElement | null = null;
 
 	private handleFoliateRelocate = (event: Event): void => {
 		this.handleRelocated((event as CustomEvent<FoliateRelocateDetail>).detail ?? {});
+
+		// 翻页模式下，翻页后重新聚焦 iframe。
+		// foliate next/prev 在 paginated 模式下可能导致 iframe 焦点丢失，
+		// 而 load 事件只在跨 section 时触发，同一章节内翻页不会重新聚焦。
+		// relocate 在每次翻页后都会触发，这里补上焦点恢复。
+		if (!Platform.isMobile && this.currentFlowMode === "paginated") {
+			requestAnimationFrame(() => this.focusActiveIframe());
+		}
 	};
+
+	/**
+	 * 聚焦当前活动的 foliate iframe，使键盘/滚轮导航无需先手动点击。
+	 *
+	 * 翻页模式（paginated）下 foliate next/prev 可能导致 iframe 焦点丢失，
+	 * 在 load 和 relocate 事件后调用此方法恢复焦点。
+	 * 不抢输入框（搜索框等）焦点，仅在安全时聚焦。
+	 */
+	private focusActiveIframe(): void {
+		// 不抢输入框焦点
+		const active = document.activeElement;
+		if (active) {
+			const tag = active.tagName;
+			if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (active as HTMLElement).isContentEditable) {
+				return;
+			}
+		}
+
+		const doc = this.currentLoadedDoc;
+		if (!doc) return;
+		const win = doc.defaultView;
+		const frame = win?.frameElement;
+		if (frame instanceof HTMLIFrameElement) {
+			frame.focus();
+		}
+	}
 
 	private handleFoliateDrawAnnotation = (event: Event): void => {
 		const detail = (event as CustomEvent<FoliateDrawAnnotationDetail>).detail;
