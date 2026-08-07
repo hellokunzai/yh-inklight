@@ -1249,6 +1249,10 @@ span.yh-ov-expand-btn:hover {
   display: none !important;
 }
 
+.yh-epub-toolbar-btn.is-dimmed {
+  opacity: 0.4;
+}
+
 .yh-epub-toolbar-overflow-btn {
   margin-left: auto;
 }

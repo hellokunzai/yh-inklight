@@ -12212,6 +12212,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.scrolledNavigating = false;
     /** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
     this.scrolledNavDirection = null;
+    /** 导航开关（PC 控制键盘翻页，移动端控制点击翻页） */
+    this.keyNavEnabled = true;
+    /** 移动端 readerContainer 点击翻页监听清理函数 */
+    this.mobileTapZoneCleanup = null;
     /** 清理 paginator scroll/touch/wheel 事件监听 */
     this.paginatorScrollCleanup = null;
     this.contextMenuDismissTimer = null;
@@ -12293,6 +12297,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.destroyRendition();
     this.stopObsidianThemeWatcher();
     this.destroyToolbarOverflow();
+    if (this.mobileTapZoneCleanup) {
+      this.mobileTapZoneCleanup();
+      this.mobileTapZoneCleanup = null;
+    }
   }
   // ================================================================
   // 文件加载（FileView 核心）
@@ -12368,6 +12376,13 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
     this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
     this.readerContainerEl.addEventListener("click", (event) => this.handleReaderAreaClick(event));
+    if (import_obsidian12.Platform.isMobile) {
+      const tapHandler = (event) => this.handleTapZone(event);
+      this.readerContainerEl.addEventListener("click", tapHandler);
+      this.mobileTapZoneCleanup = () => {
+        this.readerContainerEl.removeEventListener("click", tapHandler);
+      };
+    }
   }
   /**
    * 监听 Obsidian 原生主题变化（亮/暗切换、主题更换、CSS snippet 变更）。
@@ -12423,6 +12438,12 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       btn.addEventListener("click", opts.onClick);
       return btn;
     };
+    const keyNavBtn = createBtn({
+      icon: import_obsidian12.Platform.isMobile ? "hand" : "keyboard",
+      title: import_obsidian12.Platform.isMobile ? this.keyNavEnabled ? "\u5173\u95ED\u70B9\u51FB\u7FFB\u9875" : "\u5F00\u542F\u70B9\u51FB\u7FFB\u9875" : this.keyNavEnabled ? "\u5173\u95ED\u952E\u76D8\u7FFB\u9875" : "\u5F00\u542F\u952E\u76D8\u7FFB\u9875",
+      onClick: () => this.toggleKeyNav()
+    });
+    keyNavBtn.toggleClass("is-dimmed", !this.keyNavEnabled);
     this.toolbarItems.push(
       createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
       createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
@@ -12433,6 +12454,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
         title: this.currentFlowMode === "paginated" ? "\u5207\u6362\u4E3A\u6EDA\u52A8" : "\u5207\u6362\u4E3A\u5206\u9875",
         onClick: () => this.toggleFlowMode()
       }),
+      keyNavBtn,
       createBtn({ icon: "chevron-left", title: "\u4E0A\u4E00\u9875", onClick: () => this.prevPage() }),
       createBtn({ icon: "chevron-right", title: "\u4E0B\u4E00\u9875", onClick: () => this.nextPage() }),
       this.renderThemeSwatches()
@@ -13124,7 +13146,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
         return;
       }
     }
-    if (import_obsidian12.Platform.isMobile) {
+    if (!this.keyNavEnabled) {
       return;
     }
     const isPaginated = this.currentFlowMode === "paginated";
@@ -13194,6 +13216,68 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       }
       default:
         break;
+    }
+  }
+  /**
+   * 处理移动端点击翻页（tap zones）。
+   *
+   * 屏幕左 1/3 = 上一页/章，右 1/3 = 下一页/章，中间 1/3 不触发。
+   * 两种模式（分页/滚动）统一使用 prevPage()/nextPage()。
+   *
+   * ⚠️ iframe 内的点击事件不会冒泡到父文档，因此除 readerContainerEl 上的
+   *    监听外，还需在 attachKeyboardNavigation 中给每个 section document
+   *    单独挂 click 监听（capture 阶段，先于 foliate 自身处理器执行）。
+   *
+   * 排除情况：
+   * - keyNavEnabled 关闭时不拦截
+   * - 侧边栏打开时不拦截（让 handleReaderAreaClick 先关侧边栏）
+   * - 点击链接/按钮时不拦截（保证正常跳转和交互）
+   * - 有文本选区时不拦截（防止选完文字后误触翻页）
+   *
+   * @param event - 鼠标点击事件（移动端 touchend 后合成）
+   */
+  handleTapZone(event) {
+    if (!this.keyNavEnabled) {
+      return;
+    }
+    if (this.sidebarOpen) {
+      return;
+    }
+    const target = event.target;
+    if (target) {
+      let el = target;
+      while (el) {
+        const tag = el.tagName;
+        if (typeof tag === "string") {
+          const upper = tag.toUpperCase();
+          if (upper === "A" || upper === "BUTTON") {
+            return;
+          }
+        }
+        el = el.parentElement;
+      }
+    }
+    const doc = target?.ownerDocument ?? document;
+    const selection = doc.getSelection?.();
+    if (selection && !selection.isCollapsed) {
+      return;
+    }
+    let ratio;
+    if (event.currentTarget === this.readerContainerEl) {
+      const rect = this.readerContainerEl.getBoundingClientRect();
+      ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+    } else {
+      const view = event.view ?? window;
+      ratio = view.innerWidth > 0 ? event.clientX / view.innerWidth : 0.5;
+    }
+    if (ratio < 0.33) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.prevPage();
+    } else if (ratio > 0.67) {
+      event.preventDefault();
+      event.stopPropagation();
+      this.nextPage();
     }
   }
   /**
@@ -13490,8 +13574,17 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.applyFoliateAppearance();
     this.renderToolbar();
   }
+  /**
+   * 切换导航开关。
+   * PC 端控制键盘翻页，移动端控制点击翻页。
+   */
+  toggleKeyNav() {
+    this.keyNavEnabled = !this.keyNavEnabled;
+    this.renderToolbar();
+    const label = import_obsidian12.Platform.isMobile ? "\u70B9\u51FB\u7FFB\u9875" : "\u952E\u76D8\u7FFB\u9875";
+    new import_obsidian12.Notice(this.keyNavEnabled ? `${label}\u5DF2\u5F00\u542F` : `${label}\u5DF2\u5173\u95ED`);
+  }
   // ================================================================
-  // 阅读时间追踪
   // ================================================================
   /**
    * 启动阅读时间追踪。
@@ -13777,9 +13870,14 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.documentSelectionCleanups.set(doc, cleanup);
   }
   /**
-   * 为 foliate section iframe 挂载 keydown 监听，使阅读时（焦点在 iframe 内）
-   * 键盘翻页生效。iframe 的键盘事件不会冒泡到父文档，contentEl 上的监听
-   * 在阅读时收不到事件，故需逐 section document 单独挂载。
+   * 为 foliate section iframe 挂载导航监听。
+   *
+   * - PC 端：挂 keydown，使阅读时（焦点在 iframe 内）键盘翻页生效。
+   *   iframe 的键盘事件不会冒泡到父文档，contentEl 上的监听在阅读时
+   *   收不到事件，故需逐 section document 单独挂载。
+   * - 移动端：挂 click（capture 阶段），使点击翻页区在 iframe 内生效。
+   *   capture 阶段先于 foliate 自身的 click 处理器执行，配合
+   *   stopPropagation 避免双重翻页。
    *
    * 幂等：同一 doc 只挂一次，cleanup 存入 WeakMap（iframe 销毁时随 GC 回收）。
    */
@@ -13787,10 +13885,17 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     if (this.documentKeyboardCleanups.has(doc)) {
       return;
     }
-    const handler = (event) => this.handleKeydown(event);
-    doc.addEventListener("keydown", handler);
+    const cleanups = [];
+    const keyHandler = (event) => this.handleKeydown(event);
+    doc.addEventListener("keydown", keyHandler);
+    cleanups.push(() => doc.removeEventListener("keydown", keyHandler));
+    if (import_obsidian12.Platform.isMobile) {
+      const tapHandler = (event) => this.handleTapZone(event);
+      doc.addEventListener("click", tapHandler, true);
+      cleanups.push(() => doc.removeEventListener("click", tapHandler, true));
+    }
     this.documentKeyboardCleanups.set(doc, () => {
-      doc.removeEventListener("keydown", handler);
+      for (const fn of cleanups) fn();
     });
   }
   emitFoliateSelection(doc) {

@@ -190,6 +190,11 @@ private contextMenuEl: HTMLElement | null = null;
 	private scrolledNavigating = false;
 	/** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
 	private scrolledNavDirection: "next" | "prev" | null = null;
+
+	/** 导航开关（PC 控制键盘翻页，移动端控制点击翻页） */
+	private keyNavEnabled = true;
+	/** 移动端 readerContainer 点击翻页监听清理函数 */
+	private mobileTapZoneCleanup: (() => void) | null = null;
 	/** 清理 paginator scroll/touch/wheel 事件监听 */
 	private paginatorScrollCleanup: (() => void) | null = null;
 	private contextMenuDismissTimer: number | null = null;
@@ -264,6 +269,12 @@ private contextMenuEl: HTMLElement | null = null;
 		this.destroyRendition();
 		this.stopObsidianThemeWatcher();
 		this.destroyToolbarOverflow();
+
+		// 清理移动端点击翻页监听
+		if (this.mobileTapZoneCleanup) {
+			this.mobileTapZoneCleanup();
+			this.mobileTapZoneCleanup = null;
+		}
 	}
 
 	// ================================================================
@@ -356,6 +367,15 @@ private contextMenuEl: HTMLElement | null = null;
 		this.contentEl.addEventListener("keydown", (event) => this.handleKeydown(event));
 		this.readerContainerEl.addEventListener("wheel", (event) => this.handleWheel(event), { passive: false });
 		this.readerContainerEl.addEventListener("click", (event) => this.handleReaderAreaClick(event));
+
+		// 移动端：readerContainer 点击翻页（左 1/3 上一页/章，右 1/3 下一页/章）
+		if (Platform.isMobile) {
+			const tapHandler = (event: MouseEvent) => this.handleTapZone(event);
+			this.readerContainerEl.addEventListener("click", tapHandler);
+			this.mobileTapZoneCleanup = () => {
+				this.readerContainerEl.removeEventListener("click", tapHandler);
+			};
+		}
 	}
 
 	/**
@@ -426,6 +446,16 @@ private contextMenuEl: HTMLElement | null = null;
 			return btn;
 		};
 
+		// 导航开关按钮（PC 控制键盘翻页，移动端控制点击翻页；禁用态降低透明度）
+		const keyNavBtn = createBtn({
+			icon: Platform.isMobile ? "hand" : "keyboard",
+			title: Platform.isMobile
+				? (this.keyNavEnabled ? "关闭点击翻页" : "开启点击翻页")
+				: (this.keyNavEnabled ? "关闭键盘翻页" : "开启键盘翻页"),
+			onClick: () => this.toggleKeyNav(),
+		});
+		keyNavBtn.toggleClass("is-dimmed", !this.keyNavEnabled);
+
 		this.toolbarItems.push(
 			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),
 			createBtn({ text: "A-", title: "缩小字号", onClick: () => this.changeFontSize(-1) }),
@@ -436,6 +466,7 @@ private contextMenuEl: HTMLElement | null = null;
 				title: this.currentFlowMode === "paginated" ? "切换为滚动" : "切换为分页",
 				onClick: () => this.toggleFlowMode(),
 			}),
+			keyNavBtn,
 			createBtn({ icon: "chevron-left", title: "上一页", onClick: () => this.prevPage() }),
 			createBtn({ icon: "chevron-right", title: "下一页", onClick: () => this.nextPage() }),
 			this.renderThemeSwatches(),
@@ -1250,8 +1281,8 @@ private contextMenuEl: HTMLElement | null = null;
 			}
 		}
 
-		// 仅 PC 端启用键盘翻页（移动端无物理键盘）
-		if (Platform.isMobile) {
+		// 导航开关关闭时不拦截任何按键
+		if (!this.keyNavEnabled) {
 			return;
 		}
 
@@ -1326,9 +1357,83 @@ private contextMenuEl: HTMLElement | null = null;
 				this.goToBookEnd();
 				break;
 			}
-			default:
-				break;
+		default:
+			break;
 		}
+	}
+
+	/**
+	 * 处理移动端点击翻页（tap zones）。
+	 *
+	 * 屏幕左 1/3 = 上一页/章，右 1/3 = 下一页/章，中间 1/3 不触发。
+	 * 两种模式（分页/滚动）统一使用 prevPage()/nextPage()。
+	 *
+	 * ⚠️ iframe 内的点击事件不会冒泡到父文档，因此除 readerContainerEl 上的
+	 *    监听外，还需在 attachKeyboardNavigation 中给每个 section document
+	 *    单独挂 click 监听（capture 阶段，先于 foliate 自身处理器执行）。
+	 *
+	 * 排除情况：
+	 * - keyNavEnabled 关闭时不拦截
+	 * - 侧边栏打开时不拦截（让 handleReaderAreaClick 先关侧边栏）
+	 * - 点击链接/按钮时不拦截（保证正常跳转和交互）
+	 * - 有文本选区时不拦截（防止选完文字后误触翻页）
+	 *
+	 * @param event - 鼠标点击事件（移动端 touchend 后合成）
+	 */
+	private handleTapZone(event: MouseEvent): void {
+		if (!this.keyNavEnabled) {
+			return;
+		}
+
+		// 侧边栏打开时让 handleReaderAreaClick 先关闭它
+		if (this.sidebarOpen) {
+			return;
+		}
+
+		// 点击链接/按钮时不拦截
+		const target = event.target as Element | null;
+		if (target) {
+			let el: Element | null = target;
+			while (el) {
+				const tag = el.tagName;
+				if (typeof tag === "string") {
+					const upper = tag.toUpperCase();
+					if (upper === "A" || upper === "BUTTON") {
+						return;
+					}
+				}
+				el = el.parentElement;
+			}
+		}
+
+		// 有文本选区时不拦截（防止选完文字后误触翻页）
+		const doc = target?.ownerDocument ?? document;
+		const selection = doc.getSelection?.();
+		if (selection && !selection.isCollapsed) {
+			return;
+		}
+
+		// 计算点击位置占屏幕宽度的比例
+		let ratio: number;
+		if (event.currentTarget === this.readerContainerEl) {
+			const rect = this.readerContainerEl.getBoundingClientRect();
+			ratio = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+		} else {
+			// iframe document 上下文：clientX 相对于 iframe 视口
+			const view = (event.view ?? window) as Window;
+			ratio = view.innerWidth > 0 ? event.clientX / view.innerWidth : 0.5;
+		}
+
+		if (ratio < 0.33) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.prevPage();
+		} else if (ratio > 0.67) {
+			event.preventDefault();
+			event.stopPropagation();
+			this.nextPage();
+		}
+		// 中间 1/3 不触发，交给 foliate 原生处理
 	}
 
 	/**
@@ -1684,8 +1789,18 @@ private contextMenuEl: HTMLElement | null = null;
 		this.renderToolbar();
 	}
 
+	/**
+	 * 切换导航开关。
+	 * PC 端控制键盘翻页，移动端控制点击翻页。
+	 */
+	private toggleKeyNav(): void {
+		this.keyNavEnabled = !this.keyNavEnabled;
+		this.renderToolbar();
+		const label = Platform.isMobile ? "点击翻页" : "键盘翻页";
+		new Notice(this.keyNavEnabled ? `${label}已开启` : `${label}已关闭`);
+	}
+
 	// ================================================================
-	// 阅读时间追踪
 	// ================================================================
 
 	/**
@@ -2038,9 +2153,14 @@ private contextMenuEl: HTMLElement | null = null;
 	}
 
 	/**
-	 * 为 foliate section iframe 挂载 keydown 监听，使阅读时（焦点在 iframe 内）
-	 * 键盘翻页生效。iframe 的键盘事件不会冒泡到父文档，contentEl 上的监听
-	 * 在阅读时收不到事件，故需逐 section document 单独挂载。
+	 * 为 foliate section iframe 挂载导航监听。
+	 *
+	 * - PC 端：挂 keydown，使阅读时（焦点在 iframe 内）键盘翻页生效。
+	 *   iframe 的键盘事件不会冒泡到父文档，contentEl 上的监听在阅读时
+	 *   收不到事件，故需逐 section document 单独挂载。
+	 * - 移动端：挂 click（capture 阶段），使点击翻页区在 iframe 内生效。
+	 *   capture 阶段先于 foliate 自身的 click 处理器执行，配合
+	 *   stopPropagation 避免双重翻页。
 	 *
 	 * 幂等：同一 doc 只挂一次，cleanup 存入 WeakMap（iframe 销毁时随 GC 回收）。
 	 */
@@ -2048,10 +2168,23 @@ private contextMenuEl: HTMLElement | null = null;
 		if (this.documentKeyboardCleanups.has(doc)) {
 			return;
 		}
-		const handler = (event: KeyboardEvent) => this.handleKeydown(event);
-		doc.addEventListener("keydown", handler);
+
+		const cleanups: (() => void)[] = [];
+
+		// PC 端：键盘翻页
+		const keyHandler = (event: KeyboardEvent) => this.handleKeydown(event);
+		doc.addEventListener("keydown", keyHandler);
+		cleanups.push(() => doc.removeEventListener("keydown", keyHandler));
+
+		// 移动端：点击翻页（capture 阶段，先于 foliate 自身处理器）
+		if (Platform.isMobile) {
+			const tapHandler = (event: MouseEvent) => this.handleTapZone(event);
+			doc.addEventListener("click", tapHandler, true);
+			cleanups.push(() => doc.removeEventListener("click", tapHandler, true));
+		}
+
 		this.documentKeyboardCleanups.set(doc, () => {
-			doc.removeEventListener("keydown", handler);
+			for (const fn of cleanups) fn();
 		});
 	}
 
