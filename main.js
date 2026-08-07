@@ -12172,6 +12172,8 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.foliateView = null;
     this.loadedSectionDocs = /* @__PURE__ */ new WeakMap();
     this.documentSelectionCleanups = /* @__PURE__ */ new WeakMap();
+    /** 清理 iframe 内 keydown 监听（PC 端键盘翻页） */
+    this.documentKeyboardCleanups = /* @__PURE__ */ new WeakMap();
     /** 最近一次 foliate load 事件的 section doc，供工具栏全文搜索使用（getContents 不可靠时的可靠来源） */
     this.currentLoadedDoc = null;
     // 跟踪 foliate 高亮层实际已渲染的标注（id → 渲染时传入 foliate 的 meta）。
@@ -12239,6 +12241,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       stripScriptsFromDocument(doc);
       void inlineBlockedStylesheets({ document: doc });
       this.attachSelectionListeners(doc);
+      this.attachKeyboardNavigation(doc);
       this.handleRendered();
       if (import_obsidian12.Platform.isMobile) {
         doc.addEventListener("click", (e3) => this.handleReaderAreaClick(e3));
@@ -13096,26 +13099,97 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   // 键盘 & 滚轮导航
   // ================================================================
   /**
-   * 处理键盘导航事件。
-   * 方向键左/上 = 上一页，方向键右/下 = 下一页。
+   * 处理键盘导航事件（PC 端键盘翻页）。
+   *
+   * 翻页模式：← 上一页 / → 下一页；Space 下一页 / Shift+Space 上一页；
+   *           PageUp/PageDown 同向翻页；Home 跳到书首，End 跳到书尾。
+   * 滚动模式：↑ 上一章 / ↓ 下一章；Home 跳到书首，End 跳到书尾；
+   *           其余按键交给 iframe 原生滚动。
+   *
+   * ⚠️ 阅读正文渲染在 foliate iframe 内，iframe 的键盘事件不会冒泡到父文档，
+   *    因此除 contentEl 监听外，还需在 handleFoliateLoad 中把本方法挂到每个
+   *    section document 上（attachKeyboardNavigation），否则阅读时焦点在
+   *    iframe 内、键盘翻页不生效。
+   *
+   * ⚠️ event.target 可能来自 iframe realm，不能用 instanceof 判断标签
+   *    （跨 realm instanceof 不可靠），改用 tagName 字符串比较。
    *
    * @param event - 键盘事件
    */
   handleKeydown(event) {
-    if (event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLInputElement) {
+    const target = event.target;
+    if (target && typeof target.tagName === "string") {
+      const tag = target.tagName.toUpperCase();
+      if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT" || target.isContentEditable) {
+        return;
+      }
+    }
+    if (import_obsidian12.Platform.isMobile) {
       return;
     }
+    const isPaginated = this.currentFlowMode === "paginated";
     switch (event.key) {
-      case "ArrowLeft":
-      case "ArrowUp": {
-        event.preventDefault();
-        this.prevPage();
+      case "ArrowLeft": {
+        if (isPaginated) {
+          event.preventDefault();
+          this.prevPage();
+        }
         break;
       }
-      case "ArrowRight":
+      case "ArrowRight": {
+        if (isPaginated) {
+          event.preventDefault();
+          this.nextPage();
+        }
+        break;
+      }
+      case "ArrowUp": {
+        if (!isPaginated) {
+          event.preventDefault();
+          this.prevPage();
+        }
+        break;
+      }
       case "ArrowDown": {
+        if (!isPaginated) {
+          event.preventDefault();
+          this.nextPage();
+        }
+        break;
+      }
+      case " ": {
+        if (isPaginated) {
+          event.preventDefault();
+          if (event.shiftKey) {
+            this.prevPage();
+          } else {
+            this.nextPage();
+          }
+        }
+        break;
+      }
+      case "PageDown": {
+        if (isPaginated) {
+          event.preventDefault();
+          this.nextPage();
+        }
+        break;
+      }
+      case "PageUp": {
+        if (isPaginated) {
+          event.preventDefault();
+          this.prevPage();
+        }
+        break;
+      }
+      case "Home": {
         event.preventDefault();
-        this.nextPage();
+        this.goToBookStart();
+        break;
+      }
+      case "End": {
+        event.preventDefault();
+        this.goToBookEnd();
         break;
       }
       default:
@@ -13166,6 +13240,32 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     }
     const action = this.foliateView.prev ?? this.foliateView.goLeft;
     void action?.call(this.foliateView);
+  }
+  /**
+   * 跳转到书籍开头（Home 键）。
+   * 优先使用 foliate 的 goToFraction(0)；不支持时回退到 goTo(0)（首个 spine）。
+   */
+  goToBookStart() {
+    if (!this.foliateView) {
+      return;
+    }
+    if (typeof this.foliateView.goToFraction === "function") {
+      void this.foliateView.goToFraction(0);
+    } else {
+      void this.foliateView.goTo(0);
+    }
+  }
+  /**
+   * 跳转到书籍结尾（End 键）。
+   * 依赖 foliate 的 goToFraction(1)；不支持时静默放弃（避免误跳到某个 spine）。
+   */
+  goToBookEnd() {
+    if (!this.foliateView) {
+      return;
+    }
+    if (typeof this.foliateView.goToFraction === "function") {
+      void this.foliateView.goToFraction(1);
+    }
   }
   /**
    * 监听 paginator 的 scroll/touchmove/wheel 事件，在滚动模式下驱动跨章翻页。
@@ -13675,6 +13775,23 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       win?.removeEventListener("touchend", scheduleEmit, true);
     };
     this.documentSelectionCleanups.set(doc, cleanup);
+  }
+  /**
+   * 为 foliate section iframe 挂载 keydown 监听，使阅读时（焦点在 iframe 内）
+   * 键盘翻页生效。iframe 的键盘事件不会冒泡到父文档，contentEl 上的监听
+   * 在阅读时收不到事件，故需逐 section document 单独挂载。
+   *
+   * 幂等：同一 doc 只挂一次，cleanup 存入 WeakMap（iframe 销毁时随 GC 回收）。
+   */
+  attachKeyboardNavigation(doc) {
+    if (this.documentKeyboardCleanups.has(doc)) {
+      return;
+    }
+    const handler = (event) => this.handleKeydown(event);
+    doc.addEventListener("keydown", handler);
+    this.documentKeyboardCleanups.set(doc, () => {
+      doc.removeEventListener("keydown", handler);
+    });
   }
   emitFoliateSelection(doc) {
     const selection = doc.getSelection?.() ?? doc.defaultView?.getSelection?.();
