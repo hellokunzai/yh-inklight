@@ -191,8 +191,10 @@ private contextMenuEl: HTMLElement | null = null;
 	/** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
 	private scrolledNavDirection: "next" | "prev" | null = null;
 
-	/** 导航开关（PC 控制键盘翻页，移动端控制点击翻页） */
-	private keyNavEnabled = true;
+	/** PC 端翻页模式：键盘翻页 / 滚轮翻页（互斥，默认键盘） */
+	private pcNavMode: "keyboard" | "wheel" = "keyboard";
+	/** 移动端点按翻页开关（true=点按翻页，false=滑动翻页） */
+	private mobileTapEnabled = true;
 	/** 移动端 readerContainer 点击翻页监听清理函数 */
 	private mobileTapZoneCleanup: (() => void) | null = null;
 	/** 清理 paginator scroll/touch/wheel 事件监听 */
@@ -446,15 +448,17 @@ private contextMenuEl: HTMLElement | null = null;
 			return btn;
 		};
 
-		// 导航开关按钮（PC 控制键盘翻页，移动端控制点击翻页；禁用态降低透明度）
+		// 导航模式按钮（PC: 键盘↔滚轮互斥切换；移动端: 点按↔滑动切换）
 		const keyNavBtn = createBtn({
-			icon: Platform.isMobile ? "hand" : "keyboard",
+			icon: Platform.isMobile
+				? "hand"
+				: (this.pcNavMode === "keyboard" ? "keyboard" : "mouse"),
 			title: Platform.isMobile
-				? (this.keyNavEnabled ? "切换为滑动翻页" : "切换为点按翻页")
-				: (this.keyNavEnabled ? "关闭键盘翻页" : "开启键盘翻页"),
+				? (this.mobileTapEnabled ? "切换为滑动翻页" : "切换为点按翻页")
+				: (this.pcNavMode === "keyboard" ? "切换为滚轮翻页" : "切换为键盘翻页"),
 			onClick: () => this.toggleKeyNav(),
 		});
-		keyNavBtn.toggleClass("is-dimmed", !this.keyNavEnabled);
+		keyNavBtn.toggleClass("is-dimmed", Platform.isMobile && !this.mobileTapEnabled);
 
 		this.toolbarItems.push(
 			createBtn({ icon: "menu", title: "切换侧边栏", onClick: () => this.toggleSidebar() }),
@@ -1254,7 +1258,7 @@ private contextMenuEl: HTMLElement | null = null;
 	// ================================================================
 
 	/**
-	 * 处理键盘导航事件（PC 端键盘翻页）。
+	 * 处理键盘导航事件（PC 端键盘翻页，仅 pcNavMode === "keyboard" 时生效）。
 	 *
 	 * 翻页模式：← 上一页 / → 下一页；Space 下一页 / Shift+Space 上一页；
 	 *           PageUp/PageDown 同向翻页；Home 跳到书首，End 跳到书尾。
@@ -1281,8 +1285,8 @@ private contextMenuEl: HTMLElement | null = null;
 			}
 		}
 
-		// 导航开关关闭时不拦截任何按键
-		if (!this.keyNavEnabled) {
+		// 滚轮翻页模式下禁用键盘导航（键盘/滚轮互斥）
+		if (this.pcNavMode !== "keyboard") {
 			return;
 		}
 
@@ -1373,7 +1377,7 @@ private contextMenuEl: HTMLElement | null = null;
 	 *    单独挂 click 监听（capture 阶段，先于 foliate 自身处理器执行）。
 	 *
 	 * 排除情况：
-	 * - keyNavEnabled 关闭时不拦截
+	 * - mobileTapEnabled 关闭时不拦截（滑动翻页模式）
 	 * - 侧边栏打开时不拦截（让 handleReaderAreaClick 先关侧边栏）
 	 * - 点击链接/按钮时不拦截（保证正常跳转和交互）
 	 * - 有文本选区时不拦截（防止选完文字后误触翻页）
@@ -1381,7 +1385,7 @@ private contextMenuEl: HTMLElement | null = null;
 	 * @param event - 鼠标点击事件（移动端 touchend 后合成）
 	 */
 	private handleTapZone(event: MouseEvent): void {
-		if (!this.keyNavEnabled) {
+		if (!this.mobileTapEnabled) {
 			return;
 		}
 
@@ -1438,7 +1442,7 @@ private contextMenuEl: HTMLElement | null = null;
 
 	/**
 	 * 处理鼠标滚轮事件。
-	 * - 分页模式：滚轮直接翻页，带防抖保护。
+	 * - 分页模式：滚轮直接翻页，带防抖保护（受 pcNavMode 门控，仅滚轮模式生效）。
 	 * - 滚动模式：不做拦截，交给 foliate 内部 #container 自然滚动；
 	 *   跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
 	 *
@@ -1446,6 +1450,10 @@ private contextMenuEl: HTMLElement | null = null;
 	 */
 	private handleWheel(event: WheelEvent): void {
 		if (this.currentFlowMode !== "paginated") {
+			return;
+		}
+		// 键盘翻页模式下不拦截滚轮（键盘/滚轮互斥）
+		if (this.pcNavMode !== "wheel") {
 			return;
 		}
 		event.preventDefault();
@@ -1790,16 +1798,19 @@ private contextMenuEl: HTMLElement | null = null;
 	}
 
 	/**
-	 * 切换导航开关。
-	 * PC 端控制键盘翻页，移动端控制点按/滑动翻页。
+	 * 切换导航模式。
+	 * PC 端在键盘翻页 / 滚轮翻页之间互斥切换。
+	 * 移动端在点按翻页 / 滑动翻页之间切换。
 	 */
 	private toggleKeyNav(): void {
-		this.keyNavEnabled = !this.keyNavEnabled;
-		this.renderToolbar();
 		if (Platform.isMobile) {
-			new Notice(this.keyNavEnabled ? "点按翻页已开启" : "滑动翻页已开启");
+			this.mobileTapEnabled = !this.mobileTapEnabled;
+			this.renderToolbar();
+			new Notice(this.mobileTapEnabled ? "点按翻页已开启" : "滑动翻页已开启");
 		} else {
-			new Notice(this.keyNavEnabled ? "键盘翻页已开启" : "键盘翻页已关闭");
+			this.pcNavMode = this.pcNavMode === "keyboard" ? "wheel" : "keyboard";
+			this.renderToolbar();
+			new Notice(this.pcNavMode === "keyboard" ? "键盘翻页已开启" : "滚轮翻页已开启");
 		}
 	}
 
@@ -2174,10 +2185,15 @@ private contextMenuEl: HTMLElement | null = null;
 
 		const cleanups: (() => void)[] = [];
 
-		// PC 端：键盘翻页
-		const keyHandler = (event: KeyboardEvent) => this.handleKeydown(event);
-		doc.addEventListener("keydown", keyHandler);
-		cleanups.push(() => doc.removeEventListener("keydown", keyHandler));
+	// PC 端：键盘翻页
+	const keyHandler = (event: KeyboardEvent) => this.handleKeydown(event);
+	doc.addEventListener("keydown", keyHandler);
+	cleanups.push(() => doc.removeEventListener("keydown", keyHandler));
+
+	// PC 端：滚轮翻页（passive: false 以便 handleWheel 中 preventDefault 生效）
+	const wheelHandler = (event: WheelEvent) => this.handleWheel(event);
+	doc.addEventListener("wheel", wheelHandler, { passive: false });
+	cleanups.push(() => doc.removeEventListener("wheel", wheelHandler));
 
 		// 移动端：点击翻页（capture 阶段，先于 foliate 自身处理器）
 		if (Platform.isMobile) {

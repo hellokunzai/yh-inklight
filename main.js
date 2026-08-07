@@ -12212,8 +12212,10 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.scrolledNavigating = false;
     /** 最近一次跨章导航方向，冷却期内阻止反方向触发（防止来回跳） */
     this.scrolledNavDirection = null;
-    /** 导航开关（PC 控制键盘翻页，移动端控制点击翻页） */
-    this.keyNavEnabled = true;
+    /** PC 端翻页模式：键盘翻页 / 滚轮翻页（互斥，默认键盘） */
+    this.pcNavMode = "keyboard";
+    /** 移动端点按翻页开关（true=点按翻页，false=滑动翻页） */
+    this.mobileTapEnabled = true;
     /** 移动端 readerContainer 点击翻页监听清理函数 */
     this.mobileTapZoneCleanup = null;
     /** 清理 paginator scroll/touch/wheel 事件监听 */
@@ -12439,11 +12441,11 @@ var EpubReaderView = class extends import_obsidian12.FileView {
       return btn;
     };
     const keyNavBtn = createBtn({
-      icon: import_obsidian12.Platform.isMobile ? "hand" : "keyboard",
-      title: import_obsidian12.Platform.isMobile ? this.keyNavEnabled ? "\u5207\u6362\u4E3A\u6ED1\u52A8\u7FFB\u9875" : "\u5207\u6362\u4E3A\u70B9\u6309\u7FFB\u9875" : this.keyNavEnabled ? "\u5173\u95ED\u952E\u76D8\u7FFB\u9875" : "\u5F00\u542F\u952E\u76D8\u7FFB\u9875",
+      icon: import_obsidian12.Platform.isMobile ? "hand" : this.pcNavMode === "keyboard" ? "keyboard" : "mouse",
+      title: import_obsidian12.Platform.isMobile ? this.mobileTapEnabled ? "\u5207\u6362\u4E3A\u6ED1\u52A8\u7FFB\u9875" : "\u5207\u6362\u4E3A\u70B9\u6309\u7FFB\u9875" : this.pcNavMode === "keyboard" ? "\u5207\u6362\u4E3A\u6EDA\u8F6E\u7FFB\u9875" : "\u5207\u6362\u4E3A\u952E\u76D8\u7FFB\u9875",
       onClick: () => this.toggleKeyNav()
     });
-    keyNavBtn.toggleClass("is-dimmed", !this.keyNavEnabled);
+    keyNavBtn.toggleClass("is-dimmed", import_obsidian12.Platform.isMobile && !this.mobileTapEnabled);
     this.toolbarItems.push(
       createBtn({ icon: "menu", title: "\u5207\u6362\u4FA7\u8FB9\u680F", onClick: () => this.toggleSidebar() }),
       createBtn({ text: "A-", title: "\u7F29\u5C0F\u5B57\u53F7", onClick: () => this.changeFontSize(-1) }),
@@ -13121,7 +13123,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   // 键盘 & 滚轮导航
   // ================================================================
   /**
-   * 处理键盘导航事件（PC 端键盘翻页）。
+   * 处理键盘导航事件（PC 端键盘翻页，仅 pcNavMode === "keyboard" 时生效）。
    *
    * 翻页模式：← 上一页 / → 下一页；Space 下一页 / Shift+Space 上一页；
    *           PageUp/PageDown 同向翻页；Home 跳到书首，End 跳到书尾。
@@ -13146,7 +13148,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
         return;
       }
     }
-    if (!this.keyNavEnabled) {
+    if (this.pcNavMode !== "keyboard") {
       return;
     }
     const isPaginated = this.currentFlowMode === "paginated";
@@ -13229,7 +13231,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    *    单独挂 click 监听（capture 阶段，先于 foliate 自身处理器执行）。
    *
    * 排除情况：
-   * - keyNavEnabled 关闭时不拦截
+   * - mobileTapEnabled 关闭时不拦截（滑动翻页模式）
    * - 侧边栏打开时不拦截（让 handleReaderAreaClick 先关侧边栏）
    * - 点击链接/按钮时不拦截（保证正常跳转和交互）
    * - 有文本选区时不拦截（防止选完文字后误触翻页）
@@ -13237,7 +13239,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    * @param event - 鼠标点击事件（移动端 touchend 后合成）
    */
   handleTapZone(event) {
-    if (!this.keyNavEnabled) {
+    if (!this.mobileTapEnabled) {
       return;
     }
     if (this.sidebarOpen) {
@@ -13282,7 +13284,7 @@ var EpubReaderView = class extends import_obsidian12.FileView {
   }
   /**
    * 处理鼠标滚轮事件。
-   * - 分页模式：滚轮直接翻页，带防抖保护。
+   * - 分页模式：滚轮直接翻页，带防抖保护（受 pcNavMode 门控，仅滚轮模式生效）。
    * - 滚动模式：不做拦截，交给 foliate 内部 #container 自然滚动；
    *   跨章翻页由 relocate 事件驱动（handleRelocated 中检测边界）。
    *
@@ -13290,6 +13292,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
    */
   handleWheel(event) {
     if (this.currentFlowMode !== "paginated") {
+      return;
+    }
+    if (this.pcNavMode !== "wheel") {
       return;
     }
     event.preventDefault();
@@ -13575,16 +13580,19 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     this.renderToolbar();
   }
   /**
-   * 切换导航开关。
-   * PC 端控制键盘翻页，移动端控制点按/滑动翻页。
+   * 切换导航模式。
+   * PC 端在键盘翻页 / 滚轮翻页之间互斥切换。
+   * 移动端在点按翻页 / 滑动翻页之间切换。
    */
   toggleKeyNav() {
-    this.keyNavEnabled = !this.keyNavEnabled;
-    this.renderToolbar();
     if (import_obsidian12.Platform.isMobile) {
-      new import_obsidian12.Notice(this.keyNavEnabled ? "\u70B9\u6309\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u6ED1\u52A8\u7FFB\u9875\u5DF2\u5F00\u542F");
+      this.mobileTapEnabled = !this.mobileTapEnabled;
+      this.renderToolbar();
+      new import_obsidian12.Notice(this.mobileTapEnabled ? "\u70B9\u6309\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u6ED1\u52A8\u7FFB\u9875\u5DF2\u5F00\u542F");
     } else {
-      new import_obsidian12.Notice(this.keyNavEnabled ? "\u952E\u76D8\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u952E\u76D8\u7FFB\u9875\u5DF2\u5173\u95ED");
+      this.pcNavMode = this.pcNavMode === "keyboard" ? "wheel" : "keyboard";
+      this.renderToolbar();
+      new import_obsidian12.Notice(this.pcNavMode === "keyboard" ? "\u952E\u76D8\u7FFB\u9875\u5DF2\u5F00\u542F" : "\u6EDA\u8F6E\u7FFB\u9875\u5DF2\u5F00\u542F");
     }
   }
   // ================================================================
@@ -13892,6 +13900,9 @@ var EpubReaderView = class extends import_obsidian12.FileView {
     const keyHandler = (event) => this.handleKeydown(event);
     doc.addEventListener("keydown", keyHandler);
     cleanups.push(() => doc.removeEventListener("keydown", keyHandler));
+    const wheelHandler = (event) => this.handleWheel(event);
+    doc.addEventListener("wheel", wheelHandler, { passive: false });
+    cleanups.push(() => doc.removeEventListener("wheel", wheelHandler));
     if (import_obsidian12.Platform.isMobile) {
       const tapHandler = (event) => this.handleTapZone(event);
       doc.addEventListener("click", tapHandler, true);
